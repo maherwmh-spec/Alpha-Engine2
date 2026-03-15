@@ -1,0 +1,117 @@
+# Core
+python-dotenv==1.0.0
+pyyaml==6.0.1
+loguru==0.7.2
+
+# Web Framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+pydantic==2.5.3
+pydantic-settings==2.1.0
+
+# Task Queue
+celery==5.3.6
+redis==5.0.1
+flower==2.0.1
+
+# Database
+psycopg2-binary==2.9.9
+sqlalchemy==2.0.25
+alembic==1.13.1
+
+# Data Processing
+pandas==2.1.4
+numpy==1.26.3
+ta==0.11.0
+# ta-lib==0.4.28  (disabled - built from source in Dockerfile, not via pip)
+talib-binary==0.4.28  # pre-compiled binary, no C library needed at build time
+
+# Machine Learning
+scikit-learn==1.4.0
+xgboost==2.0.3
+lightgbm==4.2.0
+catboost==1.2.2
+
+# Hugging Face
+transformers==4.37.0
+datasets==2.16.1
+tokenizers==0.15.0
+accelerate==0.26.1
+torch==2.1.2
+
+# Genetic Algorithms
+deap==1.4.1
+featuretools==1.30.0
+
+# Time Series
+darts==0.27.2
+statsmodels==0.14.1
+prophet==1.1.5
+
+# Freqtrade (disabled - install manually via freqtrade's own installer)
+# freqtrade==2024.1
+# freqai==2024.1
+
+# Web Scraping
+playwright==1.41.1
+beautifulsoup4==4.12.3
+lxml==5.1.0
+requests==2.31.0
+httpx==0.25.2
+
+# Telegram
+python-telegram-bot==20.7
+
+# Dashboard
+streamlit==1.30.0
+gradio==4.16.0
+plotly==5.18.0
+dash==2.14.2
+
+# Scheduling
+apscheduler==3.10.4
+
+# Utilities
+tqdm==4.66.1
+python-dateutil==2.8.2
+pytz==2023.3.post1
+click==8.1.7
+
+# Testing
+pytest==7.4.4
+pytest-asyncio==0.23.3
+pytest-cov==4.1.0
+
+# Code Quality
+black==23.12.1
+flake8==7.0.0
+mypy==1.8.0
+isort==5.13.2
+
+# Monitoring
+prometheus-client==0.19.0
+sentry-sdk==1.39.2
+
+# Excel/CSV
+openpyxl==3.1.2
+xlrd==2.0.1
+
+# Compression
+zstandard==0.22.0
+
+# JSON
+orjson==3.9.12
+
+# Async
+aiohttp==3.9.1
+aiofiles==23.2.1
+asyncpg==0.29.0
+
+# WebSocket
+websocket-client==1.7.0
+
+# Cryptography
+cryptography==42.0.0
+
+# Environment
+python-multipart==0.0.6
