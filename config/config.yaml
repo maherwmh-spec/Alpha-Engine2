@@ -1,0 +1,57 @@
+# Alpha-Engine2 Configuration
+
+# ── Sahmk API ──────────────────────────────────────────────
+sahmk:
+  api_key: "shmk_live_447cbe87839b5e9d48d663625386bb4b01bcd4ff3f68a1e8"
+  base_url: "https://app.sahmk.sa/api/v1"
+  websocket_url: "wss://app.sahmk.sa/ws/v1/stocks/"
+  rest_timeout: 30
+  websocket_reconnect_delay: 30
+  max_retries: 5
+  rate_limit_per_minute: 60
+
+# ── Telegram ───────────────────────────────────────────────
+telegram:
+  bot_token: "8531313103:AAGif8EfDMoC_tk5bVukuZnRhxUgrgLF34I"
+  chat_id: "145514375"
+  enabled: true
+
+# ── Database (TimescaleDB / PostgreSQL) ────────────────────
+database:
+  host: "postgres"
+  port: 5432
+  name: "alpha_engine"
+  user: "alpha_user"
+  password: "alpha_password_2024"
+  pool_size: 10
+  max_overflow: 20
+
+# ── Redis ──────────────────────────────────────────────────
+redis:
+  host: "redis"
+  port: 6379
+  db: 0
+  password: ""
+
+# ── Market Settings ────────────────────────────────────────
+market:
+  timezone: "Asia/Riyadh"
+  open_time: "10:00"
+  close_time: "15:00"
+  trading_days: [0, 1, 2, 3, 4]
+
+# ── Filters ────────────────────────────────────────────────
+filters:
+  liquidity:
+    min_avg_volume: 100000
+    lookback_days: 20
+  volatility:
+    max_gap_pct: 10.0
+    min_price: 2.0
+    max_price: 500.0
+
+# ── Logging ────────────────────────────────────────────────
+logging:
+  level: "INFO"
+  rotation: "1 day"
+  retention: "30 days"
