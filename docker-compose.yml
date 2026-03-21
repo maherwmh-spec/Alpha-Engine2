@@ -1,0 +1,228 @@
+# Alpha-Engine2 — Docker Compose
+# NOTE: `version` key removed (obsolete in modern Docker Compose)
+
+services:
+
+  # ── PostgreSQL with TimescaleDB ─────────────────────────────
+  postgres:
+    image: timescale/timescaledb:latest-pg15
+    container_name: alpha_postgres
+    environment:
+      POSTGRES_USER: alpha_user
+      POSTGRES_PASSWORD: alpha_password_2024
+      POSTGRES_DB: alpha_engine
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/01_init.sql
+      - ./scripts/init_sahmk_tables.sql:/docker-entrypoint-initdb.d/02_sahmk.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - alpha_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U alpha_user -d alpha_engine"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ── Redis ────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: alpha_redis
+    command: redis-server --appendonly yes --requirepass alpha_redis_password_2024
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - alpha_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "alpha_redis_password_2024", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ── Main Application ─────────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: alpha_app
+    command: python scripts/main.py
+    environment:
+      - DATABASE_URL=postgresql://alpha_user:alpha_password_2024@postgres:5432/alpha_engine
+      - REDIS_URL=redis://:alpha_redis_password_2024@redis:6379/0
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./:/app
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./config:/app/config
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - alpha_network
+    restart: unless-stopped
+
+  # ── Celery Worker ────────────────────────────────────────────
+  celery_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: alpha_celery_worker
+    command: celery -A scripts.celery_app worker --loglevel=info --concurrency=4
+    environment:
+      - DATABASE_URL=postgresql://alpha_user:alpha_password_2024@postgres:5432/alpha_engine
+      - REDIS_URL=redis://:alpha_redis_password_2024@redis:6379/0
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./:/app
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./config:/app/config
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - alpha_network
+    restart: unless-stopped
+
+  # ── Celery Beat (Scheduler) ──────────────────────────────────
+  celery_beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: alpha_celery_beat
+    command: celery -A scripts.celery_app beat --loglevel=info
+    environment:
+      - DATABASE_URL=postgresql://alpha_user:alpha_password_2024@postgres:5432/alpha_engine
+      - REDIS_URL=redis://:alpha_redis_password_2024@redis:6379/0
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./:/app
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./config:/app/config
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - alpha_network
+    restart: unless-stopped
+
+  # ── Flower (Celery Monitoring) ───────────────────────────────
+  flower:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: alpha_flower
+    command: celery -A scripts.celery_app flower --port=5555
+    environment:
+      - REDIS_URL=redis://:alpha_redis_password_2024@redis:6379/0
+      - PYTHONUNBUFFERED=1
+    ports:
+      - "5555:5555"
+    depends_on:
+      - redis
+      - celery_worker
+    networks:
+      - alpha_network
+    restart: unless-stopped
+
+  # ── Market Reporter ──────────────────────────────────────────
+  market_reporter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: alpha_market_reporter
+    command: python -m bots.market_reporter.bot
+    environment:
+      - DATABASE_URL=postgresql://alpha_user:alpha_password_2024@postgres:5432/alpha_engine
+      - REDIS_URL=redis://:alpha_redis_password_2024@redis:6379/0
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./:/app
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./config:/app/config
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - alpha_network
+    restart: unless-stopped
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+      - 1.1.1.1
+
+  # ── Dashboard (Streamlit) ────────────────────────────────────
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: alpha_dashboard
+    command: streamlit run dashboard/app.py --server.port=8501 --server.address=0.0.0.0
+    environment:
+      - DATABASE_URL=postgresql://alpha_user:alpha_password_2024@postgres:5432/alpha_engine
+      - REDIS_URL=redis://:alpha_redis_password_2024@redis:6379/0
+      - PYTHONUNBUFFERED=1
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./:/app
+      - ./data:/app/data
+      - ./config:/app/config
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - alpha_network
+    restart: unless-stopped
+
+  # ── Telegram Bot ─────────────────────────────────────────────
+  telegram_bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: alpha_telegram_bot
+    command: python scripts/telegram_bot.py
+    environment:
+      - DATABASE_URL=postgresql://alpha_user:alpha_password_2024@postgres:5432/alpha_engine
+      - REDIS_URL=redis://:alpha_redis_password_2024@redis:6379/0
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./:/app
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./config:/app/config
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - alpha_network
+    restart: unless-stopped
+
+networks:
+  alpha_network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
