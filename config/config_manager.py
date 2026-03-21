@@ -113,6 +113,18 @@ class ConfigManager:
         """Return True if silent/quiet mode is enabled (suppresses non-critical notifications)"""
         return bool(self._config.get("silent_mode", False))
 
+    def enable_silent_mode(self):
+        """Enable silent mode at runtime"""
+        self._config["silent_mode"] = True
+
+    def disable_silent_mode(self):
+        """Disable silent mode at runtime"""
+        self._config["silent_mode"] = False
+
+    def is_bot_enabled(self, bot_name: str) -> bool:
+        """Return True if a specific bot is enabled in config (defaults to True)"""
+        return bool(self.get_bot_config(bot_name).get("enabled", True))
+
     def get_bot_config(self, bot_name: str) -> dict:
         """Return configuration dict for a specific bot by name"""
         bots_cfg = self._config.get("bots", {})

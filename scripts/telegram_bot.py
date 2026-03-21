@@ -20,9 +20,9 @@ class AlphaTelegramBot:
 
     def __init__(self):
         self.logger = logger.bind(bot="telegram")
-        self.token = config.get('telegram.bot_token')
-        self.chat_id = config.get('telegram.chat_id')
-        self.enabled = config.get('telegram.enabled', True)
+        self.token = config.get_telegram_token()
+        self.chat_id = config.get_telegram_chat_id()
+        self.enabled = config.is_telegram_enabled()
 
         if not self.token or not self.chat_id:
             self.logger.warning("Telegram not configured")
