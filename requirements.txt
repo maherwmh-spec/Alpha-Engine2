@@ -23,8 +23,9 @@ alembic==1.13.1
 pandas==2.1.4
 numpy==1.26.3
 ta==0.11.0
-# ta-lib==0.4.28  (disabled - built from source in Dockerfile, not via pip)
-talib-binary==0.4.28  # pre-compiled binary, no C library needed at build time
+pandas-ta==0.4.71b0
+# talib-binary removed: not available for Python 3.11
+# Use pandas-ta as drop-in replacement for TA-Lib indicators
 
 # Machine Learning
 scikit-learn==1.4.0
