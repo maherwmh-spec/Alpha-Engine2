@@ -109,6 +109,27 @@ class ConfigManager:
             return f"{base}{sep}api_key={key}"
         return base
 
+    def is_silent_mode(self) -> bool:
+        """Return True if silent/quiet mode is enabled (suppresses non-critical notifications)"""
+        return bool(self._config.get("silent_mode", False))
+
+    def get_bot_config(self, bot_name: str) -> dict:
+        """Return configuration dict for a specific bot by name"""
+        bots_cfg = self._config.get("bots", {})
+        return bots_cfg.get(bot_name, {})
+
+    def get_market_config(self) -> dict:
+        """Return market settings dict"""
+        return self._config.get("market", {})
+
+    def get_filters_config(self) -> dict:
+        """Return filters settings dict"""
+        return self._config.get("filters", {})
+
+    def is_telegram_enabled(self) -> bool:
+        """Return True if Telegram notifications are enabled"""
+        return bool(self._config.get("telegram", {}).get("enabled", True))
+
 
 # Singleton instance
 config = ConfigManager()
