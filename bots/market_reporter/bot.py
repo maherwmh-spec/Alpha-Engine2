@@ -98,9 +98,20 @@ class MarketReporter:
 
                 # Step 1: Fetch historical data for all symbols concurrently
                 all_symbols = self.sahmk.get_symbols_list() or self._default_symbols()
-                await self.fetch_all_symbols_historical(
-                    all_symbols, timeframe='1d', days=self.lf_lookback_days + 5
-                )
+                self.logger.info(f"\ud83d\udccb Total symbols from API: {len(all_symbols)}")
+
+                # جلب جميع الفواصل الزمنية المطلوبة
+                timeframes_config = [
+                    ('1d',  self.lf_lookback_days + 5),   # يومي
+                    ('1m',  3),                            # دقيقة - آخر 3 أيام
+                    ('5m',  7),                            # 5 دقائق - آخر 7 أيام
+                    ('15m', 14),                           # 15 دقيقة - آخر 14 يوم
+                ]
+                for tf, days in timeframes_config:
+                    self.logger.info(f"\ud83d\udcca Fetching {tf} data for {len(all_symbols)} symbols ({days} days)...")
+                    await self.fetch_all_symbols_historical(
+                        all_symbols, timeframe=tf, days=days
+                    )
 
                 # Step 2: Apply filters to get the active watchlist
                 filtered_symbols = await self.get_filtered_symbols_for_analysis(all_symbols)

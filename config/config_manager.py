@@ -142,6 +142,26 @@ class ConfigManager:
         """Return True if Telegram notifications are enabled"""
         return bool(self._config.get("telegram", {}).get("enabled", True))
 
+    def is_strategy_enabled(self, strategy_name: str) -> bool:
+        """Return True if a specific strategy is enabled in config (defaults to True)"""
+        return bool(self.get_strategy_config(strategy_name).get("enabled", True))
+
+    def get_strategy_config(self, strategy_name: str) -> dict:
+        """Return configuration dict for a specific strategy by name"""
+        strategies_cfg = self._config.get("strategies", {})
+        return strategies_cfg.get(strategy_name, {})
+
+    def set(self, key: str, value: Any) -> None:
+        """Set a top-level config value at runtime"""
+        self._config[key] = value
+
+    def set_nested(self, value: Any, *keys) -> None:
+        """Set a nested config value by dot-path keys"""
+        d = self._config
+        for k in keys[:-1]:
+            d = d.setdefault(k, {})
+        d[keys[-1]] = value
+
 
 # Singleton instance
 config = ConfigManager()
