@@ -44,6 +44,32 @@ class MarketReporter:
     Real-time and historical market data collector (Async Version)
     """
 
+    # قاموس أسماء القطاعات والمؤشر العام - يُستخدم عند حفظ البيانات في DB
+    SECTOR_NAMES: Dict[str, str] = {
+        '90001': 'TASI - المؤشر العام',
+        '90010': 'Banks - البنوك',
+        '90011': 'Capital Goods - السلع الرأسمالية',
+        '90012': 'Commercial and Professional Svc - الخدمات التجارية والمهنية',
+        '90013': 'Consumer Discretionary Distribution & Retail - توزيع السلع الاستهلاكية التقديرية',
+        '90014': 'Consumer Durables and Apparel - السلع المعمّرة والملابس',
+        '90015': 'Consumer Staples Distribution & Retail - توزيع السلع الاستهلاكية الأساسية',
+        '90016': 'Consumer svc - خدمات المستهلك',
+        '90017': 'Energy - الطاقة',
+        '90018': 'Financial Services - الخدمات المالية',
+        '90019': 'Food and Beverages - الأغذية والمشروبات',
+        '90020': 'Health Care Equipment and Svc - معدات وخدمات الرعاية الصحية',
+        '90021': 'Insurance - التأمين',
+        '90022': 'Materials - المواد الأساسية',
+        '90023': 'Media and Entertainment - الإعلام والترفيه',
+        '90024': 'Pharma, Biotech and Life Science - الأدوية والتقنية الحيوية',
+        '90025': 'REITs - صناديق الاستثمار العقاري',
+        '90026': 'Real Estate Mgmt and Dev - إدارة وتطوير العقارات',
+        '90027': 'Software and Svc - البرمجيات والخدمات',
+        '90028': 'Telecommunication Svc - خدمات الاتصالات',
+        '90029': 'Transportation - النقل',
+        '90030': 'Utilities - المرافق',
+    }
+
     def __init__(self):
         self.name = "market_reporter"
         self.logger = logger.bind(bot=self.name)
@@ -193,7 +219,7 @@ class MarketReporter:
                     ts,                                  # $1  time (timestamptz)
                     candle['symbol'],                    # $2  symbol
                     '1m',                                # $3  timeframe
-                    candle.get('name', 'Unknown'),       # $4  name (nullable)
+                    self.SECTOR_NAMES.get(candle['symbol'], candle.get('name', 'Unknown')),  # $4  name (sector/stock)
                     float(candle['open']),               # $5  open
                     float(candle['high']),               # $6  high
                     float(candle['low']),                # $7  low
@@ -229,8 +255,14 @@ class MarketReporter:
         # Fill required schema columns
         df_copy['symbol']        = symbol
         df_copy['timeframe']     = timeframe
-        df_copy['name']          = df_copy['name'].fillna('Unknown') \
-                                   if 'name' in df_copy.columns else 'Unknown'
+        # تعيين الاسم الصحيح: للقطاعات من SECTOR_NAMES، للأسهم من البيانات أو 'Unknown'
+        sector_name = self.SECTOR_NAMES.get(symbol)
+        if sector_name:
+            df_copy['name'] = sector_name
+        elif 'name' in df_copy.columns:
+            df_copy['name'] = df_copy['name'].fillna('Unknown')
+        else:
+            df_copy['name'] = 'Unknown'
         df_copy['open_interest'] = df_copy['open_interest'].fillna(0).astype(int) \
                                    if 'open_interest' in df_copy.columns else 0
         df_copy['source']        = f'sahmk_rest_{timeframe}'

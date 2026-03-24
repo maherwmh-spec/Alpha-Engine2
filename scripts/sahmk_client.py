@@ -380,13 +380,45 @@ class SahmkClient:
             self.logger.error(f"❌ Error fetching historical OHLCV for {symbol}: {e}")
             return pd.DataFrame()
 
+    # ──────────────────────────────────────────────────────────────────────────
+    # القطاعات والمؤشر العام - تُضاف دائماً إلى قائمة الاشتراك في WebSocket
+    # ──────────────────────────────────────────────────────────────────────────
+    SECTOR_SYMBOLS: List[str] = [
+        '90001',  # المؤشر العام تاسي (TASI)
+        '90010',  # البنوك
+        '90011',  # السلع الرأسمالية
+        '90012',  # الخدمات التجارية والمهنية
+        '90013',  # توزيع السلع الاستهلاكية التقديرية والتجزئة
+        '90014',  # السلع المعمّرة والملابس
+        '90015',  # توزيع السلع الاستهلاكية الأساسية والتجزئة
+        '90016',  # خدمات المستهلك
+        '90017',  # الطاقة
+        '90018',  # الخدمات المالية
+        '90019',  # الأغذية والمشروبات
+        '90020',  # معدات وخدمات الرعاية الصحية
+        '90021',  # التأمين
+        '90022',  # المواد الأساسية
+        '90023',  # الإعلام والترفيه
+        '90024',  # الأدوية والتقنية الحيوية
+        '90025',  # صناديق الاستثمار العقاري
+        '90026',  # إدارة وتطوير العقارات
+        '90027',  # البرمجيات والخدمات
+        '90028',  # خدمات الاتصالات
+        '90029',  # النقل
+        '90030',  # المرافق
+    ]
+
     def get_symbols_list(self) -> List[str]:
-        """Fetch list of all TASI symbols"""
+        """Fetch list of all TASI symbols including sectors and TASI index"""
         try:
-            self.logger.info("📋 Fetching TASI symbols list")
+            self.logger.info("📋 Fetching TASI symbols list (stocks + sectors + index)")
 
             cached = redis_manager.get('sahmk:symbols_list')
             if cached:
+                # تأكد من وجود القطاعات في الـ cache أيضاً
+                for s in self.SECTOR_SYMBOLS:
+                    if s not in cached:
+                        cached.append(s)
                 return cached
 
             gainers_data = self._make_request('GET', 'market/gainers/')
@@ -406,18 +438,28 @@ class SahmkClient:
                         if sym and sym not in symbols:
                             symbols.append(sym)
 
+            # ── إضافة القطاعات والمؤشر العام دائماً ──
+            for sector_sym in self.SECTOR_SYMBOLS:
+                if sector_sym not in symbols:
+                    symbols.append(sector_sym)
+
             if symbols:
                 redis_manager.set('sahmk:symbols_list', symbols, ttl=3600)
-                self.logger.success(f"✅ Fetched {len(symbols)} TASI symbols")
+                stock_count  = len(symbols) - len(self.SECTOR_SYMBOLS)
+                self.logger.success(
+                    f"✅ Symbols list ready: {len(symbols)} total "
+                    f"({stock_count} stocks + {len(self.SECTOR_SYMBOLS)} sectors/index)"
+                )
 
             return symbols
 
         except Exception as e:
             self.logger.error(f"❌ Error fetching symbols list: {e}")
+            # fallback يشمل القطاعات والمؤشر
             return [
                 "2222", "1120", "2010", "2350", "4200",
                 "1180", "2380", "3020", "1010", "4030"
-            ]
+            ] + self.SECTOR_SYMBOLS
 
     def get_quote(self, symbol: str) -> Dict:
         """Fetch current quote for a symbol"""
