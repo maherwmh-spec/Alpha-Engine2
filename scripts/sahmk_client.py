@@ -305,6 +305,11 @@ class SahmkClient:
                               limit: int = 1000) -> pd.DataFrame:
         """Fetch historical OHLCV data via REST API"""
         try:
+            # إذا كان الرمز قطاعاً أو مؤشراً عاماً، فلا تحاول جلب البيانات التاريخية عبر REST API
+            if symbol in self.SECTOR_SYMBOLS:
+                self.logger.warning(f"⚠️ لا يمكن جلب البيانات التاريخية للقطاع/المؤشر {symbol} عبر REST API. سيتم جلب البيانات اللحظية فقط.")
+                return pd.DataFrame()
+
             self.logger.info(f"📊 Fetching historical OHLCV: {symbol} | {timeframe} | limit={limit}")
 
             if end_date is None:

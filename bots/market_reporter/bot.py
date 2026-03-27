@@ -468,7 +468,7 @@ class MarketReporter:
         semaphore = asyncio.Semaphore(FETCH_CONCURRENCY)
         fetch_tasks = [
             self._fetch_ohlcv_for_filter_safe(sym, semaphore)
-            for sym in all_symbols
+            for sym in all_symbols if sym not in self.SECTOR_NAMES # لا تحاول جلب بيانات تاريخية للقطاعات
         ]
         data_frames = await asyncio.gather(*fetch_tasks)
 
@@ -481,6 +481,11 @@ class MarketReporter:
         filter_results = await asyncio.gather(*filter_tasks)
 
         passing_symbols = [sym for sym, passed in filter_results if passed]
+
+        # إضافة القطاعات والمؤشر العام دائماً إلى قائمة الرموز المفلترة
+        for sector_sym in self.SECTOR_NAMES.keys():
+            if sector_sym not in passing_symbols:
+                passing_symbols.append(sector_sym)
 
         self.logger.success(
             f"✅ Filtering complete: {len(passing_symbols)}/{len(all_symbols)} passed."
