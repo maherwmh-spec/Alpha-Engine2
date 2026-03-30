@@ -566,6 +566,10 @@ class SahmkClient:
                 error_msg = data.get('message', 'Unknown error')
                 self.logger.error(f"❌ WebSocket server error: {error_msg}")
 
+            else:
+                # Log any other message type to diagnose sector data format
+                self.logger.info(f"🔍 Received unknown WebSocket message type '{msg_type}': {message}")
+
         except json.JSONDecodeError as e:
             self.logger.warning(f"⚠️ Invalid JSON from WebSocket: {e}")
         except Exception as e:
