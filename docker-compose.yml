@@ -221,7 +221,7 @@ services:
 
   # ── Freqtrade (Backtesting & Paper Trading) ──────────────────
   freqtrade:
-    image: freqtradeorg/freqtrade:stable
+    image: freqtradeorg/freqtrade:stable_freqai
     container_name: alpha_freqtrade
     command: >
       trade
