@@ -1,1 +1,10 @@
-{"freqtrade_config": { "max_open_trades": 5, "stake_currency": "SAR", "stake_amount": 1000, "dry_run": true, "db_url": "postgresql+psycopg2://alpha_user:alpha_password_2024@postgres:5432/alpha_engine", "exchange": { "name": "binance", "key": "", "secret": "", "pair_whitelist": [] }, "telegram": { "enabled": true, "token": "8531313103:AAGif8EfDMoC_tk5bVukuZnRhxUgrgLF34I", "chat_id": "145514375" }, "api_server": { "enabled": true, "listen_ip_address": "0.0.0.0", "listen_port": 8080, "username": "admin", "password": "alpha_password_2024" }, "freqai": { "enabled": true, "purge_old_models": true, "train_period_days": 30, "backtest_period_days": 7, "continual_learning": { "enabled": true, "retrain_after_days": 1 }, "feature_parameters": { "include_timeframes": [ "1m", "5m", "15m" ], "include_corr_pairlist": false, "label_period_candles": 24, "include_indicators": [ "ema", "rsi", "macd" ] }, "data_split_parameters": { "test_size": 0.2 }, "model_training_parameters": { "n_estimators": 500, "learning_rate": 0.05 } } }}
+{"freqtrade_config": { "max_open_trades": 5, "stake_currency": "SAR", "stake_amount": 1000, "dry_run": true, "db_url": "postgresql+psycopg2://alpha_user:alpha_password_2024@postgres:5432/alpha_engine", "exchange": { "name": "binance", "key": "", "secret": "", "pair_whitelist": [] }, "telegram": { "enabled": true, "token": "8531313103:AAGif8EfDMoC_tk5bVukuZnRhxUgrgLF34I", "chat_id": "145514375" }, "api_server": { "enabled": true, "listen_ip_address": "0.0.0.0", "listen_port": 8080, "username": "admin", "password": "alpha_password_2024" }, "freqai": { "enabled": true, "purge_old_models": true, "train_period_days": 30, "backtest_period_days": 7, "continual_learning": { "enabled": true, "retrain_after_days": 1 }, "feature_parameters": { "include_timeframes": [ "1m", "5m", "15m" ], "include_corr_pairlist": false, "label_period_candles": 24, "include_indicators": [ "ema", "rsi", "macd" ] }, "data_split_parameters": { "test_size": 0.2 },    "model_training_parameters": {
+        "n_estimators": 500,
+        "learning_rate": 0.05
+    }
+},
+"huggingface": {
+    "token": "",
+    "genetic_model": "all-MiniLM-L6-v2",
+    "sentiment_model": "ProsusAI/finbert"
+}
