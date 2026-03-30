@@ -454,10 +454,13 @@ class MarketReporter:
     # Symbol Filtering (Async & Parallel)
     # ═══════════════════════════════════════════════════════════════════════
 
+    # --- تغيير فلسفة الفلترة: جمع شامل، فلترة لاحقة ---
+    # الفلاتر الصارمة (سيولة، تذبذب) تم نقلها إلى الروبوتات اللاحقة (Scientist, Monitor)
+    # هنا، نطبق فلتر خفيف جداً فقط لاستبعاد الأسهم الميتة تماماً.
     async def get_filtered_symbols_for_analysis(
         self, all_symbols: List[str]
     ) -> List[str]:
-        """Return symbols that pass ALL filters, run concurrently."""
+        """Applies a very light filter to exclude dead stocks, then returns all symbols."""
         # redis_manager.get is SYNC — no await
         cached = redis_manager.get('filtered_symbols:ready')
         if cached:
@@ -473,14 +476,15 @@ class MarketReporter:
         ]
         data_frames = await asyncio.gather(*fetch_tasks)
 
-        # Apply filters in parallel
+        # --- الفلترة الجديدة: فقط استبعاد الأسهم ذات حجم تداول صفر لمدة 10 أيام ---
         filter_tasks = [
-            self._apply_filters_to_symbol(sym, df)
+            self._apply_light_filter(sym, df)
             for sym, df in zip(all_symbols, data_frames)
             if df is not None and not df.empty
         ]
         filter_results = await asyncio.gather(*filter_tasks)
 
+        # كل الرموز التي لم يتم استبعادها تعتبر "ناجحة"
         passing_symbols = [sym for sym, passed in filter_results if passed]
 
         # إضافة القطاعات والمؤشر العام دائماً إلى قائمة الرموز المفلترة
@@ -501,37 +505,17 @@ class MarketReporter:
         async with semaphore:
             return await self._fetch_ohlcv_for_filter(symbol)
 
-    async def _apply_filters_to_symbol(
+    async def _apply_light_filter(
         self, symbol: str, df: pd.DataFrame
     ) -> Tuple[str, bool]:
-        """Applies liquidity + volatility filters to one symbol's data."""
+        """Applies a very light filter: exclude if volume has been zero for 10+ days."""
         try:
-            avg_vol     = df['volume'].mean()
-            today_vol   = df['volume'].iloc[-1]
-            active_days = int((df['volume'] > 0).sum())
-            rel_vol     = today_vol / avg_vol if avg_vol > 0 else 0
-
-            df = df.copy()
-            df['chg'] = df['close'].pct_change().abs()
-            avg_chg   = df['chg'].mean()
-
-            # Liquidity check
-            if not (
-                rel_vol     >= self.rv_threshold and
-                active_days >= self.min_active_days and
-                avg_chg     >= self.min_avg_change
-            ):
+            # فلتر خفيف: إذا كان حجم التداول صفراً لآخر 10 أيام، استبعد السهم
+            if len(df) >= 10 and (df['volume'].tail(10) == 0).all():
+                self.logger.debug(f"Excluding {symbol}: Zero volume for last 10 days.")
                 return symbol, False
 
-            # Volatility check
-            if len(df) >= 2:
-                yesterday_chg = abs(
-                    (df['close'].iloc[-1] - df['close'].iloc[-2]) /
-                    df['close'].iloc[-2]
-                )
-                if yesterday_chg > self.max_gap_pct:
-                    return symbol, False
-
+            # إذا لم يتم استبعاده، فإنه ينجح في الفلتر
             return symbol, True
         except Exception as e:
             self.logger.error(f"❌ Filter error for {symbol}: {e}")

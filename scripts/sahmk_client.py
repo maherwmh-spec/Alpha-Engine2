@@ -426,22 +426,20 @@ class SahmkClient:
                         cached.append(s)
                 return cached
 
-            gainers_data = self._make_request('GET', 'market/gainers/')
-            losers_data  = self._make_request('GET', 'market/losers/')
+            # --- تغيير فلسفة الجمع: جلب كل الرموز مباشرة ---
+            # بدلاً من الاعتماد على قوائم الرابحين/الخاسرين، نستخدم endpoint يجلب كل رموز السوق
+            all_symbols_data = self._make_request('GET', 'market/symbols/')
 
+            # --- معالجة القائمة الجديدة ---
             symbols = []
-            for dataset in [gainers_data, losers_data]:
-                if isinstance(dataset, dict):
-                    items = dataset.get('gainers', dataset.get('losers', []))
-                    for item in items:
-                        sym = str(item.get('symbol', ''))
-                        if sym and sym not in symbols:
-                            symbols.append(sym)
-                elif isinstance(dataset, list):
-                    for item in dataset:
-                        sym = str(item.get('symbol', ''))
-                        if sym and sym not in symbols:
-                            symbols.append(sym)
+            if isinstance(all_symbols_data, list):
+                for item in all_symbols_data:
+                    sym = str(item.get('symbol', ''))
+                    if sym and sym not in symbols:
+                        symbols.append(sym)
+
+
+
 
             # ── إضافة القطاعات والمؤشر العام دائماً ──
             for sector_sym in self.SECTOR_SYMBOLS:
