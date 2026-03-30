@@ -41,34 +41,35 @@ FETCH_CONCURRENCY = 20  # Number of symbols to fetch in parallel
 
 # قاموس أسماء القطاعات والمؤشر العام - يُستخدم عند حفظ البيانات في DB
 SECTOR_NAMES: Dict[str, str] = {
+    '90001': 'TASI - المؤشر العام',
+    '90010': 'Banks - البنوك',
+    '90011': 'Capital Goods - السلع الرأسمالية',
+    '90012': 'Commercial and Professional Svc - الخدمات التجارية والمهنية',
+    '90013': 'Consumer Discretionary Distribution & Retail - توزيع السلع الاستهلاكية التقديرية',
+    '90014': 'Consumer Durables and Apparel - السلع المعمّرة والملابس',
+    '90015': 'Consumer Staples Distribution & Retail - توزيع السلع الاستهلاكية الأساسية',
+    '90016': 'Consumer svc - خدمات المستهلك',
+    '90017': 'Energy - الطاقة',
+    '90018': 'Financial Services - الخدمات المالية',
+    '90019': 'Food and Beverages - الأغذية والمشروبات',
+    '90020': 'Health Care Equipment and Svc - معدات وخدمات الرعاية الصحية',
+    '90021': 'Insurance - التأمين',
+    '90022': 'Materials - المواد الأساسية',
+    '90023': 'Media and Entertainment - الإعلام والترفيه',
+    '90024': 'Pharma, Biotech and Life Science - الأدوية والتقنية الحيوية',
+    '90025': 'REITs - صناديق الاستثمار العقاري',
+    '90026': 'Real Estate Mgmt and Dev - إدارة وتطوير العقارات',
+    '90027': 'Software and Svc - البرمجيات والخدمات',
+    '90028': 'Telecommunication Svc - خدمات الاتصالات',
+    '90029': 'Transportation - النقل',
+    '90030': 'Utilities - المرافق',
+}
+
 
 class MarketReporter:
     """
     Real-time and historical market data collector (Async Version)
     """
-        '90001': 'TASI - المؤشر العام',
-        '90010': 'Banks - البنوك',
-        '90011': 'Capital Goods - السلع الرأسمالية',
-        '90012': 'Commercial and Professional Svc - الخدمات التجارية والمهنية',
-        '90013': 'Consumer Discretionary Distribution & Retail - توزيع السلع الاستهلاكية التقديرية',
-        '90014': 'Consumer Durables and Apparel - السلع المعمّرة والملابس',
-        '90015': 'Consumer Staples Distribution & Retail - توزيع السلع الاستهلاكية الأساسية',
-        '90016': 'Consumer svc - خدمات المستهلك',
-        '90017': 'Energy - الطاقة',
-        '90018': 'Financial Services - الخدمات المالية',
-        '90019': 'Food and Beverages - الأغذية والمشروبات',
-        '90020': 'Health Care Equipment and Svc - معدات وخدمات الرعاية الصحية',
-        '90021': 'Insurance - التأمين',
-        '90022': 'Materials - المواد الأساسية',
-        '90023': 'Media and Entertainment - الإعلام والترفيه',
-        '90024': 'Pharma, Biotech and Life Science - الأدوية والتقنية الحيوية',
-        '90025': 'REITs - صناديق الاستثمار العقاري',
-        '90026': 'Real Estate Mgmt and Dev - إدارة وتطوير العقارات',
-        '90027': 'Software and Svc - البرمجيات والخدمات',
-        '90028': 'Telecommunication Svc - خدمات الاتصالات',
-        '90029': 'Transportation - النقل',
-        '90030': 'Utilities - المرافق',
-    }
 
     def __init__(self):
         self.name = "market_reporter"
