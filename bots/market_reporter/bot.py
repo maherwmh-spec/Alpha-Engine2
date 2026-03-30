@@ -128,11 +128,14 @@ class MarketReporter:
                 self.logger.info(f"\ud83d\udccb Total symbols from API: {len(all_symbols)}")
 
                 # جلب جميع الفواصل الزمنية المطلوبة
+                # --- جلب جميع الأطر الزمنية المطلوبة ---
                 timeframes_config = [
-                    ('1d',  self.lf_lookback_days + 5),   # يومي
-                    ('1m',  3),                            # دقيقة - آخر 3 أيام
-                    ('5m',  7),                            # 5 دقائق - آخر 7 أيام
-                    ('15m', 14),                           # 15 دقيقة - آخر 14 يوم
+                    ("1d",  365 * 5), # 5 سنوات
+                    ("1h",  180),     # 6 أشهر
+                    ("30m", 90),      # 3 أشهر
+                    ("15m", 60),      # شهران
+                    ("5m",  30),      # شهر واحد
+                    ("1m",  7),       # أسبوع واحد
                 ]
                 for tf, days in timeframes_config:
                     self.logger.info(f"\ud83d\udcca Fetching {tf} data for {len(all_symbols)} symbols ({days} days)...")
@@ -511,8 +514,9 @@ class MarketReporter:
         """Applies a very light filter: exclude if volume has been zero for 10+ days."""
         try:
             # فلتر خفيف: إذا كان حجم التداول صفراً لآخر 10 أيام، استبعد السهم
-            if len(df) >= 10 and (df['volume'].tail(10) == 0).all():
-                self.logger.debug(f"Excluding {symbol}: Zero volume for last 10 days.")
+            # فلتر خفيف جداً: إذا كان حجم التداول صفراً لآخر 30 يوماً، استبعد السهم
+            if len(df) >= 30 and (df["volume"].tail(30) == 0).all():
+                self.logger.debug(f"Excluding {symbol}: Zero volume for last 30 days.")
                 return symbol, False
 
             # إذا لم يتم استبعاده، فإنه ينجح في الفلتر

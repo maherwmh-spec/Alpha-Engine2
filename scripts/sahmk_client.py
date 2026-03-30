@@ -299,12 +299,18 @@ class SahmkClient:
             self.logger.error(f"❌ Unexpected error in REST request: {e}")
             raise
 
+    SUPPORTED_TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h', '1d']
+
     def get_historical_ohlcv(self, symbol: str, timeframe: str = '1m',
                               start_date: Optional[datetime] = None,
                               end_date: Optional[datetime] = None,
                               limit: int = 1000) -> pd.DataFrame:
         """Fetch historical OHLCV data via REST API"""
         try:
+            # التحقق من صحة الإطار الزمني
+            if timeframe not in self.SUPPORTED_TIMEFRAMES:
+                raise ValueError(f"Timeframe '{timeframe}' is not supported. Supported: {self.SUPPORTED_TIMEFRAMES}")
+
             # إذا كان الرمز قطاعاً أو مؤشراً عاماً، فلا تحاول جلب البيانات التاريخية عبر REST API
             if symbol in self.SECTOR_SYMBOLS:
                 self.logger.warning(f"⚠️ لا يمكن جلب البيانات التاريخية للقطاع/المؤشر {symbol} عبر REST API. سيتم جلب البيانات اللحظية فقط.")
