@@ -8,7 +8,7 @@
 set -e
 
 MIGRATION_FILE="migration_sectors.sql"
-CONTAINER="alpha-engine2-postgres-1"
+CONTAINER="alpha_postgres"
 
 echo "======================================================"
 echo "  Alpha-Engine2 - تطبيق migration القطاعات"
