@@ -227,6 +227,7 @@ services:
       trade
       --config /freqtrade/user_data/config.json
       --strategy FreqAIStrategy
+      --freqaimodel LightGBMClassifier
     ports:
       - "8080:8080"
     volumes:
