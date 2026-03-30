@@ -39,13 +39,13 @@ DB_POOL: Optional[asyncpg.Pool] = None
 FETCH_CONCURRENCY = 20  # Number of symbols to fetch in parallel
 
 
+# قاموس أسماء القطاعات والمؤشر العام - يُستخدم عند حفظ البيانات في DB
+SECTOR_NAMES: Dict[str, str] = {
+
 class MarketReporter:
     """
     Real-time and historical market data collector (Async Version)
     """
-
-    # قاموس أسماء القطاعات والمؤشر العام - يُستخدم عند حفظ البيانات في DB
-    SECTOR_NAMES: Dict[str, str] = {
         '90001': 'TASI - المؤشر العام',
         '90010': 'Banks - البنوك',
         '90011': 'Capital Goods - السلع الرأسمالية',
@@ -219,7 +219,7 @@ class MarketReporter:
                     ts,                                  # $1  time (timestamptz)
                     candle['symbol'],                    # $2  symbol
                     '1m',                                # $3  timeframe
-                    self.SECTOR_NAMES.get(candle['symbol'], candle.get('name', 'Unknown')),  # $4  name (sector/stock)
+                    SECTOR_NAMES.get(candle["symbol"], candle.get("name", "Unknown")),  # $4  name (sector/stock)
                     float(candle['open']),               # $5  open
                     float(candle['high']),               # $6  high
                     float(candle['low']),                # $7  low
@@ -256,7 +256,7 @@ class MarketReporter:
         df_copy['symbol']        = symbol
         df_copy['timeframe']     = timeframe
         # تعيين الاسم الصحيح: للقطاعات من SECTOR_NAMES، للأسهم من البيانات أو 'Unknown'
-        sector_name = self.SECTOR_NAMES.get(symbol)
+        sector_name = SECTOR_NAMES.get(symbol)
         if sector_name:
             df_copy['name'] = sector_name
         elif 'name' in df_copy.columns:
@@ -468,7 +468,7 @@ class MarketReporter:
         semaphore = asyncio.Semaphore(FETCH_CONCURRENCY)
         fetch_tasks = [
             self._fetch_ohlcv_for_filter_safe(sym, semaphore)
-            for sym in all_symbols if sym not in self.SECTOR_NAMES # لا تحاول جلب بيانات تاريخية للقطاعات
+            for sym in all_symbols if sym not in SECTOR_NAMES # لا تحاول جلب بيانات تاريخية للقطاعات
         ]
         data_frames = await asyncio.gather(*fetch_tasks)
 
@@ -483,7 +483,7 @@ class MarketReporter:
         passing_symbols = [sym for sym, passed in filter_results if passed]
 
         # إضافة القطاعات والمؤشر العام دائماً إلى قائمة الرموز المفلترة
-        for sector_sym in self.SECTOR_NAMES.keys():
+        for sector_sym in SECTOR_NAMES.keys():
             if sector_sym not in passing_symbols:
                 passing_symbols.append(sector_sym)
 
