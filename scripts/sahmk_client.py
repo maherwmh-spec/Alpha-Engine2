@@ -495,6 +495,36 @@ class SahmkClient:
     # WebSocket Methods
     # =============================================
 
+    def get_sector_snapshot(self, symbol: str) -> Optional[Dict]:
+        """
+        جلب بيانات لحظية للقطاعات والمؤشر العام عبر REST API.
+        يُستخدم لأن WebSocket لا يرسل ticks للقطاعات.
+        يعيد dict يحتوي على: symbol, price, open, high, low, close, volume, timestamp
+        """
+        try:
+            # نحاول أولاً endpoint مخصص للقطاعات
+            data = self._make_request('GET', f'quote/{symbol}/')
+            if not data:
+                return None
+
+            price = float(data.get('price', data.get('last', data.get('close', 0))))
+            if price <= 0:
+                return None
+
+            return {
+                'symbol':    symbol,
+                'price':     price,
+                'open':      float(data.get('open',   price)),
+                'high':      float(data.get('high',   price)),
+                'low':       float(data.get('low',    price)),
+                'close':     float(data.get('close',  price)),
+                'volume':    int(float(data.get('volume', 0))),
+                'timestamp': datetime.now()
+            }
+        except Exception as e:
+            self.logger.debug(f"⚠️ Could not fetch sector snapshot for {symbol}: {e}")
+            return None
+
     def set_on_candle_complete(self, callback: Callable):
         """Set callback for when a 1m candle is completed"""
         self._on_candle_complete = callback

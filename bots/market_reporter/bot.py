@@ -356,6 +356,11 @@ class MarketReporter:
         self.sahmk.start_realtime_stream(symbols)
         self.logger.success("✅ Real-time stream active.")
 
+        # --- بدء حلقة جلب بيانات القطاعات عبر REST API ---
+        if not hasattr(self, '_sector_fetch_task') or self._sector_fetch_task.done():
+            self.logger.info("📊 Starting sector/index REST API polling loop...")
+            self._sector_fetch_task = asyncio.create_task(self._sector_polling_loop())
+
     def _on_tick_received(self, tick: Dict):
         """
         Callback from WebSocket thread.
@@ -528,6 +533,40 @@ class MarketReporter:
     # ═══════════════════════════════════════════════════════════════════════
     # Utilities
     # ═══════════════════════════════════════════════════════════════════════
+
+    async def _sector_polling_loop(self):
+        """حلقة تعمل كل دقيقة لجلب بيانات القطاعات والمؤشر العام عبر REST API"""
+        while True:
+            await asyncio.sleep(60) # انتظر دقيقة
+
+            now = get_saudi_time()
+            # لا تعمل خارج أوقات التداول
+            if not (is_market_open(now) or is_near_market_open(now, minutes=5)):
+                continue
+
+            self.logger.info("🔄 Fetching sector/index data via REST...")
+            tasks = [self._fetch_and_save_sector(s) for s in SECTOR_NAMES.keys()]
+            results = await asyncio.gather(*tasks)
+            saved_count = sum(1 for r in results if r)
+            self.logger.success(f"✅ Sector data updated: {saved_count}/{len(SECTOR_NAMES)} saved.")
+
+    async def _fetch_and_save_sector(self, symbol: str) -> bool:
+        """يجلب بيانات قطاع واحد ويحفظها كشمعة دقيقة"""
+        snapshot = await asyncio.to_thread(self.sahmk.get_sector_snapshot, symbol)
+        if snapshot:
+            # تحويل الـ snapshot إلى صيغة شمعة دقيقة
+            candle = {
+                'symbol':    symbol,
+                'timestamp': snapshot['timestamp'].replace(second=0, microsecond=0),
+                'open':      snapshot['open'],
+                'high':      snapshot['high'],
+                'low':       snapshot['low'],
+                'close':     snapshot['price'], # السعر الحالي هو سعر الإغلاق
+                'volume':    snapshot['volume'],
+            }
+            await self._save_candle_to_db(candle)
+            return True
+        return False
 
     def _default_symbols(self) -> List[str]:
         """Fallback TASI symbols."""
