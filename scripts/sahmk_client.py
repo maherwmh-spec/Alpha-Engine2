@@ -34,6 +34,12 @@ from loguru import logger
 
 from config.config_manager import config
 from scripts.redis_manager import redis_manager
+from scripts.saudi_exchange_scraper import (
+    is_sector_symbol,
+    get_tasi_candle,
+    get_all_sector_candles,
+    SECTOR_DISPLAY_NAMES,
+)
 
 
 class SahmkAPIError(Exception):
@@ -305,15 +311,22 @@ class SahmkClient:
                               start_date: Optional[datetime] = None,
                               end_date: Optional[datetime] = None,
                               limit: int = 1000) -> pd.DataFrame:
-        """Fetch historical OHLCV data via REST API"""
+        """Fetch historical OHLCV data via REST API.
+
+        للرموز 900xx (قطاعات/مؤشر): لا توجد بيانات تاريخية في Sahmk API.
+        يُعاد DataFrame فارغ فوراً دون أي طلب HTTP.
+        """
         try:
             # التحقق من صحة الإطار الزمني
             if timeframe not in self.SUPPORTED_TIMEFRAMES:
                 raise ValueError(f"Timeframe '{timeframe}' is not supported. Supported: {self.SUPPORTED_TIMEFRAMES}")
 
-            # إذا كان الرمز قطاعاً أو مؤشراً عاماً، فلا تحاول جلب البيانات التاريخية عبر REST API
-            if symbol in self.SECTOR_SYMBOLS:
-                self.logger.warning(f"⚠️ لا يمكن جلب البيانات التاريخية للقطاع/المؤشر {symbol} عبر REST API. سيتم جلب البيانات اللحظية فقط.")
+            # ── فصل القطاعات: Sahmk لا يدعمها — أعد DataFrame فارغاً فوراً ──
+            if is_sector_symbol(symbol):
+                self.logger.debug(
+                    f"⏭️  Skipping Sahmk historical fetch for sector/index {symbol} "
+                    f"(use Saudi Exchange scraper instead)"
+                )
                 return pd.DataFrame()
 
             self.logger.info(f"📊 Fetching historical OHLCV: {symbol} | {timeframe} | limit={limit}")
@@ -497,20 +510,40 @@ class SahmkClient:
 
     def get_sector_snapshot(self, symbol: str) -> Optional[Dict]:
         """
-        جلب بيانات لحظية للقطاعات والمؤشر العام عبر REST API.
-        يُستخدم لأن WebSocket لا يرسل ticks للقطاعات.
-        يعيد dict يحتوي على: symbol, price, open, high, low, close, volume, timestamp
+        [مُهمَل — استخدم saudi_exchange_scraper.get_all_sector_candles() بدلاً منه]
+
+        Sahmk API يعطي 404 لكل رموز 900xx.
+        هذه الدالة تُحوَّل تلقائياً إلى Saudi Exchange scraper.
         """
+        if is_sector_symbol(symbol):
+            self.logger.debug(
+                f"⏭️  get_sector_snapshot({symbol}): redirecting to Saudi Exchange scraper"
+            )
+            from scripts.saudi_exchange_scraper import get_all_sector_candles
+            all_candles = get_all_sector_candles()
+            candle = all_candles.get(symbol)
+            if candle:
+                # تحويل شكل الشمعة إلى الشكل القديم المتوقع
+                return {
+                    'symbol':    candle['symbol'],
+                    'price':     candle['close'],
+                    'open':      candle['open'],
+                    'high':      candle['high'],
+                    'low':       candle['low'],
+                    'close':     candle['close'],
+                    'volume':    candle['volume'],
+                    'timestamp': candle['timestamp'],
+                }
+            return None
+
+        # للأسهم العادية: استخدم Sahmk quote endpoint
         try:
-            # نحاول أولاً endpoint مخصص للقطاعات
             data = self._make_request('GET', f'quote/{symbol}/')
             if not data:
                 return None
-
             price = float(data.get('price', data.get('last', data.get('close', 0))))
             if price <= 0:
                 return None
-
             return {
                 'symbol':    symbol,
                 'price':     price,
@@ -519,10 +552,10 @@ class SahmkClient:
                 'low':       float(data.get('low',    price)),
                 'close':     float(data.get('close',  price)),
                 'volume':    int(float(data.get('volume', 0))),
-                'timestamp': datetime.now()
+                'timestamp': datetime.now(),
             }
         except Exception as e:
-            self.logger.debug(f"⚠️ Could not fetch sector snapshot for {symbol}: {e}")
+            self.logger.debug(f"⚠️ Could not fetch snapshot for {symbol}: {e}")
             return None
 
     def set_on_candle_complete(self, callback: Callable):
@@ -729,18 +762,35 @@ class SahmkClient:
                 self._connect_websocket(symbols)
 
     def start_realtime_stream(self, symbols: List[str]):
-        """Start real-time WebSocket stream for given symbols"""
+        """
+        Start real-time WebSocket stream.
+
+        يُصفّي رموز القطاعات (900xx) تلقائياً قبل إرسالها لـ Sahmk WebSocket،
+        لأن Sahmk لا يرسل أي ticks لها رغم قبول الاشتراك.
+        بيانات القطاعات تُجلب بشكل منفصل عبر Saudi Exchange scraper.
+        """
         if self._ws_running:
             self.logger.warning("⚠️ WebSocket already running")
             return
 
-        self._subscribed_symbols = symbols
+        # ── فصل الأسهم العادية عن القطاعات ──────────────────────────────────
+        stock_symbols  = [s for s in symbols if not is_sector_symbol(s)]
+        sector_symbols = [s for s in symbols if is_sector_symbol(s)]
+
+        if sector_symbols:
+            self.logger.info(
+                f"⏭️  Excluding {len(sector_symbols)} sector/index symbols from WebSocket "
+                f"(will be fetched via Saudi Exchange scraper): {sector_symbols[:5]}..."
+            )
+
+        self._subscribed_symbols = stock_symbols
         self._ws_running         = True
         self._ws_retry_count     = 0
 
         self.logger.info(
-            f"🚀 Starting real-time stream for {len(symbols)} symbols: "
-            f"{symbols[:5]}{'...' if len(symbols) > 5 else ''}"
+            f"🚀 Starting real-time stream for {len(stock_symbols)} stock symbols "
+            f"(excluded {len(sector_symbols)} sector symbols): "
+            f"{stock_symbols[:5]}{'...' if len(stock_symbols) > 5 else ''}"
         )
 
         self._ws_thread = threading.Thread(

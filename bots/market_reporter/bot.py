@@ -33,38 +33,19 @@ from config.config_manager import config
 from scripts.redis_manager import redis_manager
 from scripts.sahmk_client import SahmkClient, get_sahmk_client
 from scripts.utils import get_saudi_time, is_trading_hours
-from scripts.saudi_exchange_sectors import get_all_sector_snapshots
+from scripts.saudi_exchange_scraper import (
+    get_all_sector_candles,
+    is_sector_symbol,
+    SECTOR_DISPLAY_NAMES,
+)
 
 # --- Constants ---
 DB_POOL: Optional[asyncpg.Pool] = None
 FETCH_CONCURRENCY = 20  # Number of symbols to fetch in parallel
 
 
-# قاموس أسماء القطاعات والمؤشر العام - يُستخدم عند حفظ البيانات في DB
-SECTOR_NAMES: Dict[str, str] = {
-    '90001': 'TASI - المؤشر العام',
-    '90010': 'Banks - البنوك',
-    '90011': 'Capital Goods - السلع الرأسمالية',
-    '90012': 'Commercial and Professional Svc - الخدمات التجارية والمهنية',
-    '90013': 'Consumer Discretionary Distribution & Retail - توزيع السلع الاستهلاكية التقديرية',
-    '90014': 'Consumer Durables and Apparel - السلع المعمّرة والملابس',
-    '90015': 'Consumer Staples Distribution & Retail - توزيع السلع الاستهلاكية الأساسية',
-    '90016': 'Consumer svc - خدمات المستهلك',
-    '90017': 'Energy - الطاقة',
-    '90018': 'Financial Services - الخدمات المالية',
-    '90019': 'Food and Beverages - الأغذية والمشروبات',
-    '90020': 'Health Care Equipment and Svc - معدات وخدمات الرعاية الصحية',
-    '90021': 'Insurance - التأمين',
-    '90022': 'Materials - المواد الأساسية',
-    '90023': 'Media and Entertainment - الإعلام والترفيه',
-    '90024': 'Pharma, Biotech and Life Science - الأدوية والتقنية الحيوية',
-    '90025': 'REITs - صناديق الاستثمار العقاري',
-    '90026': 'Real Estate Mgmt and Dev - إدارة وتطوير العقارات',
-    '90027': 'Software and Svc - البرمجيات والخدمات',
-    '90028': 'Telecommunication Svc - خدمات الاتصالات',
-    '90029': 'Transportation - النقل',
-    '90030': 'Utilities - المرافق',
-}
+# قاموس أسماء القطاعات — مصدره الآن saudi_exchange_scraper (مصدر واحد للحقيقة)
+SECTOR_NAMES: Dict[str, str] = SECTOR_DISPLAY_NAMES
 
 
 class MarketReporter:
@@ -192,6 +173,9 @@ class MarketReporter:
         Save a 1m candle to TimescaleDB.
         Schema PK: (time, symbol, timeframe)  — timeframe is required.
         volume is bigint → must be int, not float.
+
+        للقطاعات (900xx): source = 'saudi_exchange_scraper'
+        للأسهم العادية:   source = 'sahmk_websocket'
         """
         if DB_POOL is None:
             self.logger.warning("DB pool not available, skipping candle save.")
@@ -202,6 +186,13 @@ class MarketReporter:
         if ts.tzinfo is None:
             import pytz
             ts = pytz.timezone('Asia/Riyadh').localize(ts)
+
+        # تحديد المصدر بناءً على نوع الرمز
+        symbol = candle['symbol']
+        source = candle.get('source') or (
+            'saudi_exchange_scraper' if is_sector_symbol(symbol) else 'sahmk_websocket'
+        )
+        name = SECTOR_NAMES.get(symbol) or candle.get('name') or 'Unknown'
 
         sql = """
         INSERT INTO market_data.ohlcv
@@ -221,17 +212,17 @@ class MarketReporter:
             async with DB_POOL.acquire() as conn:
                 await conn.execute(
                     sql,
-                    ts,                                  # $1  time (timestamptz)
-                    candle['symbol'],                    # $2  symbol
-                    '1m',                                # $3  timeframe
-                    SECTOR_NAMES.get(candle["symbol"], candle.get("name", "Unknown")),  # $4  name (sector/stock)
-                    float(candle['open']),               # $5  open
-                    float(candle['high']),               # $6  high
-                    float(candle['low']),                # $7  low
-                    float(candle['close']),              # $8  close
-                    int(float(candle['volume'])),        # $9  volume (bigint)
-                    0,                                   # $10 open_interest
-                    'sahmk_websocket'                    # $11 source
+                    ts,                        # $1  time (timestamptz)
+                    symbol,                    # $2  symbol
+                    '1m',                      # $3  timeframe
+                    name,                      # $4  name
+                    float(candle['open']),     # $5  open
+                    float(candle['high']),     # $6  high
+                    float(candle['low']),      # $7  low
+                    float(candle['close']),    # $8  close
+                    int(float(candle['volume'])),  # $9  volume (bigint)
+                    0,                         # $10 open_interest
+                    source,                    # $11 source
                 )
         except Exception as e:
             self.logger.error(f"❌ DB save error for {candle['symbol']}: {e}")
@@ -438,20 +429,55 @@ class MarketReporter:
     async def fetch_all_symbols_historical(
         self, symbols: List[str], timeframe: str, days: int
     ):
-        """Fetch historical data for all symbols concurrently."""
+        """
+        Fetch historical data for all symbols concurrently.
+
+        القطاعات (900xx): تُستبعد من Sahmk ويُجلب snapshot واحد من Saudi Exchange
+        للإطار 1m فقط (لا توجد بيانات تاريخية للقطاعات).
+        """
+        stock_symbols  = [s for s in symbols if not is_sector_symbol(s)]
+        sector_symbols = [s for s in symbols if is_sector_symbol(s)]
+
         self.logger.info(
-            f"📊 Fetching historical data for {len(symbols)} symbols..."
+            f"📊 Fetching historical data | "
+            f"{len(stock_symbols)} stocks via Sahmk + "
+            f"{len(sector_symbols)} sectors via Saudi Exchange (1m only)"
         )
+
+        # ── الأسهم العادية: Sahmk REST API ──────────────────────────────────
         semaphore = asyncio.Semaphore(FETCH_CONCURRENCY)
         tasks = [
             self._fetch_and_log(sym, timeframe, days, semaphore)
-            for sym in symbols
+            for sym in stock_symbols
         ]
         results = await asyncio.gather(*tasks)
         ok = sum(1 for r in results if r is not None)
         self.logger.success(
-            f"✅ Historical fetch complete | ✅{ok} ❌{len(symbols) - ok}"
+            f"✅ Stocks historical fetch ({timeframe}) | ✅{ok} ❌{len(stock_symbols) - ok}"
         )
+
+        # ── القطاعات: snapshot لحظي من Saudi Exchange (1m فقط) ──────────────
+        if sector_symbols and timeframe == '1m':
+            self.logger.info(
+                f"📊 Fetching sector snapshots from Saudi Exchange for {len(sector_symbols)} symbols..."
+            )
+            try:
+                all_candles = await asyncio.to_thread(get_all_sector_candles)
+                saved = 0
+                for sym in sector_symbols:
+                    candle = all_candles.get(sym)
+                    if candle:
+                        await self._save_candle_to_db(candle)
+                        saved += 1
+                self.logger.success(
+                    f"✅ Sector snapshots saved: {saved}/{len(sector_symbols)}"
+                )
+            except Exception as e:
+                self.logger.error(f"❌ Sector historical fetch error: {e}")
+        elif sector_symbols:
+            self.logger.debug(
+                f"⏭️  Skipping sector fetch for timeframe={timeframe} (only 1m supported)"
+            )
 
     async def _fetch_and_log(
         self, symbol: str, timeframe: str, days: int, semaphore: asyncio.Semaphore
@@ -538,63 +564,57 @@ class MarketReporter:
     async def _sector_polling_loop(self):
         """
         حلقة تعمل كل دقيقة لجلب بيانات القطاعات والمؤشر العام.
-        المصدر: Saudi Exchange الرسمي (لا يحتاج API key)
-        يحسب بيانات القطاعات من أسهمها المكوّنة عبر VWAP.
+
+        المصدر: Saudi Exchange الرسمي (saudiexchange.sa) — بدون API key.
+        المنطق:
+          - تعمل فقط خلال ساعات التداول (09:55 - 15:05، الأحد-الخميس)
+          - تجلب TASI من ThemeTASIUtilityServlet
+          - تجلب القطاعات من بيانات السوق وتحسب VWAP من أسهمها
+          - تحفظ كل شمعة في TimescaleDB
         """
-        self.logger.info("📊 Sector polling loop started (Saudi Exchange source)")
+        self.logger.info("📊 Sector polling loop started (Saudi Exchange scraper)")
         while True:
             await asyncio.sleep(60)  # انتظر دقيقة
 
-            # فحص وقت التداول: 09:55 - 15:05 (الأحد-الخميس)
+            # ── فحص وقت التداول ──────────────────────────────────────────────
             now = get_saudi_time()
-            if now.weekday() in [4, 5]:  # الجمعة والسبت
+            if now.weekday() in [4, 5]:  # الجمعة = 4، السبت = 5
+                self.logger.debug("⏭️  Sector polling: market closed (weekend)")
                 continue
-            market_start = now.replace(hour=9, minute=55, second=0, microsecond=0)
+            market_start = now.replace(hour=9,  minute=55, second=0, microsecond=0)
             market_end   = now.replace(hour=15, minute=5,  second=0, microsecond=0)
             if not (market_start <= now <= market_end):
+                self.logger.debug(
+                    f"⏭️  Sector polling: outside trading hours "
+                    f"({now.strftime('%H:%M')} not in 09:55-15:05)"
+                )
                 continue
 
             self.logger.info("🔄 Fetching sector/index data from Saudi Exchange...")
             try:
                 # جلب كل البيانات في thread منفصل (blocking I/O)
-                snapshots = await asyncio.to_thread(get_all_sector_snapshots)
+                all_candles = await asyncio.to_thread(get_all_sector_candles)
 
-                if not snapshots:
-                    self.logger.warning("⚠️ No sector snapshots received from Saudi Exchange")
+                if not all_candles:
+                    self.logger.warning("⚠️ No sector candles received from Saudi Exchange")
                     continue
 
-                # حفظ كل snapshot كشمعة 1m
-                save_tasks = [self._save_sector_snapshot(sym, snap)
-                              for sym, snap in snapshots.items()]
-                results = await asyncio.gather(*save_tasks)
-                saved_count = sum(1 for r in results if r)
-                self.logger.success(
-                    f"✅ Sector data updated: {saved_count}/{len(snapshots)} saved "
-                    f"(TASI + {len(snapshots)-1} sectors)"
-                )
-            except Exception as e:
-                self.logger.error(f"❌ Sector polling error: {e}")
+                # حفظ كل شمعة في DB
+                save_tasks = [
+                    self._save_candle_to_db(candle)
+                    for candle in all_candles.values()
+                ]
+                await asyncio.gather(*save_tasks, return_exceptions=True)
 
-    async def _save_sector_snapshot(self, symbol: str, snapshot: dict) -> bool:
-        """يحفظ snapshot قطاع كشمعة 1m في قاعدة البيانات"""
-        try:
-            ts = snapshot['timestamp']
-            if hasattr(ts, 'replace'):
-                ts = ts.replace(second=0, microsecond=0)
-            candle = {
-                'symbol':    symbol,
-                'timestamp': ts,
-                'open':      snapshot['open'],
-                'high':      snapshot['high'],
-                'low':       snapshot['low'],
-                'close':     snapshot['close'],
-                'volume':    snapshot['volume'],
-            }
-            await self._save_candle_to_db(candle)
-            return True
-        except Exception as e:
-            self.logger.error(f"❌ Sector save error [{symbol}]: {e}")
-            return False
+                saved_count = len(all_candles)
+                tasi_ok = '✅' if '90001' in all_candles else '❌'
+                self.logger.success(
+                    f"✅ Sector data updated: {saved_count} saved "
+                    f"(TASI={tasi_ok}, sectors={saved_count - (1 if '90001' in all_candles else 0)})"
+                )
+
+            except Exception as e:
+                self.logger.error(f"❌ Sector polling error: {e}", exc_info=True)
 
     def _default_symbols(self) -> List[str]:
         """Fallback TASI symbols."""
