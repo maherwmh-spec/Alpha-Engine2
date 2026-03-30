@@ -22,7 +22,7 @@
         "order_book_top": 1
     },
     "exchange": {
-        "name": "kraken",
+        "name": "binanceus",
         "key": "",
         "secret": "",
         "pair_whitelist": [
@@ -66,7 +66,7 @@
         "live_retrain_hours": 24,
         "identifier": "alpha_freqai_v1",
         "feature_parameters": {
-            "include_timeframes": ["1m", "5m", "15m"],
+            "include_timeframes": ["5m", "15m", "1h"],
             "include_corr_pairlist": [],
             "label_period_candles": 24,
             "include_shifted_candles": 2,
