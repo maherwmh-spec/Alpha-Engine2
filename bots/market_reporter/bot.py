@@ -32,7 +32,7 @@ from loguru import logger
 from config.config_manager import config
 from scripts.redis_manager import redis_manager
 from scripts.sahmk_client import SahmkClient, get_sahmk_client
-from scripts.utils import get_saudi_time
+from scripts.utils import get_saudi_time, is_trading_hours
 
 # --- Constants ---
 DB_POOL: Optional[asyncpg.Pool] = None
@@ -539,9 +539,14 @@ class MarketReporter:
         while True:
             await asyncio.sleep(60) # انتظر دقيقة
 
+            # لا تعمل خارج أوقات التداول (+ 5 دقائق قبل الافتتاح)
             now = get_saudi_time()
-            # لا تعمل خارج أوقات التداول
-            if not (is_market_open(now) or is_near_market_open(now, minutes=5)):
+            # فحص وقت التداول: 09:55 - 15:05 (الأحد-الخميس)
+            if now.weekday() in [4, 5]:  # الجمعة والسبت
+                continue
+            market_start = now.replace(hour=9, minute=55, second=0, microsecond=0)
+            market_end   = now.replace(hour=15, minute=5,  second=0, microsecond=0)
+            if not (market_start <= now <= market_end):
                 continue
 
             self.logger.info("🔄 Fetching sector/index data via REST...")
