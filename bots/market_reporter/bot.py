@@ -33,6 +33,7 @@ from config.config_manager import config
 from scripts.redis_manager import redis_manager
 from scripts.sahmk_client import SahmkClient, get_sahmk_client
 from scripts.utils import get_saudi_time, is_trading_hours
+from scripts.saudi_exchange_sectors import get_all_sector_snapshots
 
 # --- Constants ---
 DB_POOL: Optional[asyncpg.Pool] = None
@@ -535,13 +536,17 @@ class MarketReporter:
     # ═══════════════════════════════════════════════════════════════════════
 
     async def _sector_polling_loop(self):
-        """حلقة تعمل كل دقيقة لجلب بيانات القطاعات والمؤشر العام عبر REST API"""
+        """
+        حلقة تعمل كل دقيقة لجلب بيانات القطاعات والمؤشر العام.
+        المصدر: Saudi Exchange الرسمي (لا يحتاج API key)
+        يحسب بيانات القطاعات من أسهمها المكوّنة عبر VWAP.
+        """
+        self.logger.info("📊 Sector polling loop started (Saudi Exchange source)")
         while True:
-            await asyncio.sleep(60) # انتظر دقيقة
+            await asyncio.sleep(60)  # انتظر دقيقة
 
-            # لا تعمل خارج أوقات التداول (+ 5 دقائق قبل الافتتاح)
-            now = get_saudi_time()
             # فحص وقت التداول: 09:55 - 15:05 (الأحد-الخميس)
+            now = get_saudi_time()
             if now.weekday() in [4, 5]:  # الجمعة والسبت
                 continue
             market_start = now.replace(hour=9, minute=55, second=0, microsecond=0)
@@ -549,29 +554,47 @@ class MarketReporter:
             if not (market_start <= now <= market_end):
                 continue
 
-            self.logger.info("🔄 Fetching sector/index data via REST...")
-            tasks = [self._fetch_and_save_sector(s) for s in SECTOR_NAMES.keys()]
-            results = await asyncio.gather(*tasks)
-            saved_count = sum(1 for r in results if r)
-            self.logger.success(f"✅ Sector data updated: {saved_count}/{len(SECTOR_NAMES)} saved.")
+            self.logger.info("🔄 Fetching sector/index data from Saudi Exchange...")
+            try:
+                # جلب كل البيانات في thread منفصل (blocking I/O)
+                snapshots = await asyncio.to_thread(get_all_sector_snapshots)
 
-    async def _fetch_and_save_sector(self, symbol: str) -> bool:
-        """يجلب بيانات قطاع واحد ويحفظها كشمعة دقيقة"""
-        snapshot = await asyncio.to_thread(self.sahmk.get_sector_snapshot, symbol)
-        if snapshot:
-            # تحويل الـ snapshot إلى صيغة شمعة دقيقة
+                if not snapshots:
+                    self.logger.warning("⚠️ No sector snapshots received from Saudi Exchange")
+                    continue
+
+                # حفظ كل snapshot كشمعة 1m
+                save_tasks = [self._save_sector_snapshot(sym, snap)
+                              for sym, snap in snapshots.items()]
+                results = await asyncio.gather(*save_tasks)
+                saved_count = sum(1 for r in results if r)
+                self.logger.success(
+                    f"✅ Sector data updated: {saved_count}/{len(snapshots)} saved "
+                    f"(TASI + {len(snapshots)-1} sectors)"
+                )
+            except Exception as e:
+                self.logger.error(f"❌ Sector polling error: {e}")
+
+    async def _save_sector_snapshot(self, symbol: str, snapshot: dict) -> bool:
+        """يحفظ snapshot قطاع كشمعة 1m في قاعدة البيانات"""
+        try:
+            ts = snapshot['timestamp']
+            if hasattr(ts, 'replace'):
+                ts = ts.replace(second=0, microsecond=0)
             candle = {
                 'symbol':    symbol,
-                'timestamp': snapshot['timestamp'].replace(second=0, microsecond=0),
+                'timestamp': ts,
                 'open':      snapshot['open'],
                 'high':      snapshot['high'],
                 'low':       snapshot['low'],
-                'close':     snapshot['price'], # السعر الحالي هو سعر الإغلاق
+                'close':     snapshot['close'],
                 'volume':    snapshot['volume'],
             }
             await self._save_candle_to_db(candle)
             return True
-        return False
+        except Exception as e:
+            self.logger.error(f"❌ Sector save error [{symbol}]: {e}")
+            return False
 
     def _default_symbols(self) -> List[str]:
         """Fallback TASI symbols."""
