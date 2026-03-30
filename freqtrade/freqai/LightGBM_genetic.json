@@ -1,0 +1,44 @@
+{
+    "freqai": {
+        "enabled": true,
+        "model_name": "LightGBMRegressor",
+        "model_path": "freqtrade/freqai/",
+        "purge_old_models": true,
+        "train_period_days": 30,
+        "backtest_period_days": 7,
+        "continual_learning": {
+            "enabled": true,
+            "retrain_after_days": 1
+        },
+        "feature_parameters": {
+            "include_timeframes": [
+                "1m",
+                "5m",
+                "15m"
+            ],
+            "include_corr_pairlist": false,
+            "label_period_candles": 24,
+            "include_indicators": [
+                "ema",
+                "rsi",
+                "macd"
+            ]
+        },
+        "data_split_parameters": {
+            "test_size": 0.2
+        },
+        "model_training_parameters": {
+            "n_estimators": 500,
+            "learning_rate": 0.05
+        },
+        "feature_selection": {
+            "enabled": true,
+            "method": "genetic",
+            "n_features_to_select": 10,
+            "n_generations": 20,
+            "population_size": 50,
+            "crossover_probability": 0.5,
+            "mutation_probability": 0.2
+        }
+    }
+}

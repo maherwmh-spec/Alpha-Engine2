@@ -226,3 +226,26 @@ networks:
 volumes:
   postgres_data:
   redis_data:
+
+
+  # ── Freqtrade (Backtesting & Paper Trading) ──────────────────
+  freqtrade:
+    image: freqtradeorg/freqtrade:stable
+    container_name: alpha_freqtrade
+    command: >
+      trade
+      --config /freqtrade/config.json
+      --strategy FreqAIStrategy
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./freqtrade:/freqtrade/user_data
+      - ./config:/freqtrade/config
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - alpha_network
+    restart: unless-stopped
