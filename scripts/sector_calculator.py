@@ -328,8 +328,22 @@ async def compute_sector_candles_from_db(conn) -> Dict[str, Dict]:
     Returns:
         Dict[sector_symbol → candle_dict] جاهز للحفظ في market_data.ohlcv
     """
-    now = datetime.now()
-    lookback = now - timedelta(minutes=5)  # آخر 5 دقائق
+    import pytz
+    riyadh_tz = pytz.timezone('Asia/Riyadh')
+    now = datetime.now(tz=riyadh_tz)
+
+    # نافذة بحث تكيّفية:
+    # - أثناء التداول (09:30-15:10 KSA): آخر 10 دقائق
+    # - خارج التداول: آخر 90 دقيقة (لالتقاط آخر شمعة قبل الإغلاق)
+    hour_min = now.hour * 60 + now.minute
+    is_trading = (9 * 60 + 30) <= hour_min <= (15 * 60 + 10) and now.weekday() < 5
+    lookback_minutes = 10 if is_trading else 90
+    lookback = now - timedelta(minutes=lookback_minutes)
+
+    logger.debug(
+        f'🕐 sector_calculator: now={now.strftime("%H:%M KSA")}, '
+        f'trading={is_trading}, lookback={lookback_minutes}m'
+    )
 
     # ── جلب آخر شمعة لكل سهم من DB ──────────────────────────────────────────
     sql = """
@@ -349,8 +363,8 @@ async def compute_sector_candles_from_db(conn) -> Dict[str, Dict]:
 
     if not rows:
         logger.warning(
-            f'⚠️ No stock candles found in DB for last 5 minutes '
-            f'(lookback={lookback.strftime("%H:%M:%S")})'
+            f'⚠️ No stock candles found in DB for last {lookback_minutes} minutes '
+            f'(lookback={lookback.strftime("%H:%M:%S KSA")}, trading={is_trading})'
         )
         return {}
 
