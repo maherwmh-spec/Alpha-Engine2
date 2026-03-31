@@ -17,6 +17,7 @@ from scripts.utils import (
     get_saudi_time, calculate_percentage_change,
     is_support_level, is_resistance_level
 )
+import json
 
 
 class StrategicAnalyzer:
@@ -478,16 +479,34 @@ class StrategicAnalyzer:
         try:
             self.logger.info("Starting Strategic Analyzer")
             
-            # Get symbols from database if not provided
+            # Get symbols: config watchlist → DB ohlcv → fallback
             if symbols is None:
-                with db.get_session() as session:
-                    query = text("SELECT DISTINCT symbol FROM market_data.stock_prices LIMIT 100")
-                    result = session.execute(query)
-                    symbols = [row[0] for row in result.fetchall()]
+                # 1. Try watchlist from config
+                watchlist = config.get('watchlist', {})
+                symbols = watchlist.get('symbols', [])
+                
+                # 2. Fallback: query from market_data.ohlcv
+                if not symbols:
+                    try:
+                        with db.get_session() as session:
+                            query = text("""
+                                SELECT DISTINCT symbol
+                                FROM market_data.ohlcv
+                                WHERE timeframe = '1m'
+                                  AND time >= NOW() - INTERVAL '1 day'
+                                  AND symbol NOT LIKE '9%'
+                                LIMIT 100
+                            """)
+                            result = session.execute(query)
+                            symbols = [row[0] for row in result.fetchall()]
+                    except Exception as db_err:
+                        self.logger.warning(f"Could not fetch symbols from DB: {db_err}")
             
             if not symbols:
-                self.logger.warning("No symbols to analyze")
+                self.logger.warning("No symbols to analyze — check watchlist in config.yaml")
                 return
+            
+            self.logger.info(f"Analyzing {len(symbols)} symbols: {symbols[:5]}...")
             
             all_signals = []
             
@@ -506,17 +525,25 @@ class StrategicAnalyzer:
                         all_signals.append(signal)
                         
                         # Save to database
-                        with db.get_session() as session:
-                            insert_signal(
-                                session,
-                                strategy_name=signal['strategy'],
-                                symbol=signal['symbol'],
-                                signal_type=signal['signal'],
-                                price=signal['price'],
-                                confidence=signal['confidence'],
-                                timeframe=signal['timeframe'],
-                                metadata={'reasons': signal['reasons']}
+                        try:
+                            with db.get_session() as session:
+                                insert_signal(
+                                    session,
+                                    strategy_name=signal['strategy'],
+                                    symbol=signal['symbol'],
+                                    signal_type=signal['signal'],
+                                    price=signal['price'],
+                                    confidence=signal['confidence'],
+                                    timeframe=signal['timeframe'],
+                                    metadata={'reasons': signal['reasons']}
+                                )
+                            self.logger.success(
+                                f"✅ Signal saved: {signal['symbol']} "
+                                f"{signal['signal']} [{signal['strategy']}] "
+                                f"conf={signal['confidence']:.2f}"
                             )
+                        except Exception as save_err:
+                            self.logger.error(f"Failed to save signal: {save_err}")
                         
                         # Cache signal
                         redis_manager.cache_signal(signal['strategy'], symbol, signal)
