@@ -38,6 +38,7 @@ from scripts.saudi_exchange_scraper import (
     is_sector_symbol,
     SECTOR_DISPLAY_NAMES,
 )
+from scripts.sector_calculator import compute_sector_candles_from_db
 
 # --- Constants ---
 DB_POOL: Optional[asyncpg.Pool] = None
@@ -563,16 +564,17 @@ class MarketReporter:
 
     async def _sector_polling_loop(self):
         """
-        حلقة تعمل كل دقيقة لجلب بيانات القطاعات والمؤشر العام.
+        حلقة تعمل كل دقيقة لحساب بيانات القطاعات والمؤشر العام.
 
-        المصدر: Saudi Exchange الرسمي (saudiexchange.sa) — بدون API key.
-        المنطق:
-          - تعمل فقط خلال ساعات التداول (09:55 - 15:05، الأحد-الخميس)
-          - تجلب TASI من ThemeTASIUtilityServlet
-          - تجلب القطاعات من بيانات السوق وتحسب VWAP من أسهمها
-          - تحفظ كل شمعة في TimescaleDB
+        استراتيجية المصدر (بالأولوية):
+          1. أساسي: حساب VWAP من بيانات الأسهم في DB (sector_calculator)
+             → يعمل دائماً بدون اتصال خارجي
+          2. احتياطي: Saudi Exchange scraper (إذا كان DB فارغاً)
+             → قد يفشل بسبب Cloudflare من IP الخادم
+
+        يعمل فقط خلال ساعات التداول (09:55 - 15:05، الأحد-الخميس).
         """
-        self.logger.info("📊 Sector polling loop started (Saudi Exchange scraper)")
+        self.logger.info("📊 Sector polling loop started (DB calculator + Saudi Exchange fallback)")
         while True:
             await asyncio.sleep(60)  # انتظر دقيقة
 
@@ -590,31 +592,55 @@ class MarketReporter:
                 )
                 continue
 
-            self.logger.info("🔄 Fetching sector/index data from Saudi Exchange...")
+            all_candles: Dict = {}
+
+            # ── المصدر الأساسي: حساب من DB ───────────────────────────────
             try:
-                # جلب كل البيانات في thread منفصل (blocking I/O)
-                all_candles = await asyncio.to_thread(get_all_sector_candles)
+                if DB_POOL is not None:
+                    async with DB_POOL.acquire() as conn:
+                        all_candles = await compute_sector_candles_from_db(conn)
+                    if all_candles:
+                        self.logger.debug(
+                            f"✅ DB calculator: {len(all_candles)} sector candles computed"
+                        )
+            except Exception as e:
+                self.logger.warning(f"⚠️ DB sector calculator error: {e}")
+                all_candles = {}
 
-                if not all_candles:
-                    self.logger.warning("⚠️ No sector candles received from Saudi Exchange")
-                    continue
+            # ── المصدر الاحتياطي: Saudi Exchange scraper ──────────────────
+            if not all_candles:
+                self.logger.info(
+                    "🔄 DB calculator returned no data — trying Saudi Exchange scraper..."
+                )
+                try:
+                    all_candles = await asyncio.to_thread(get_all_sector_candles)
+                except Exception as e:
+                    self.logger.error(f"❌ Saudi Exchange scraper error: {e}")
+                    all_candles = {}
 
-                # حفظ كل شمعة في DB
+            if not all_candles:
+                self.logger.warning(
+                    "⚠️ Both sources failed — no sector data this cycle. "
+                    "Check DB has recent 1m stock data."
+                )
+                continue
+
+            # ── حفظ كل شمعة في DB ───────────────────────────────────────────
+            try:
                 save_tasks = [
                     self._save_candle_to_db(candle)
                     for candle in all_candles.values()
                 ]
                 await asyncio.gather(*save_tasks, return_exceptions=True)
 
-                saved_count = len(all_candles)
                 tasi_ok = '✅' if '90001' in all_candles else '❌'
+                source  = all_candles[next(iter(all_candles))].get('source', 'unknown')
                 self.logger.success(
-                    f"✅ Sector data updated: {saved_count} saved "
-                    f"(TASI={tasi_ok}, sectors={saved_count - (1 if '90001' in all_candles else 0)})"
+                    f"✅ Sector data saved: {len(all_candles)} candles "
+                    f"(TASI={tasi_ok}, source={source})"
                 )
-
             except Exception as e:
-                self.logger.error(f"❌ Sector polling error: {e}", exc_info=True)
+                self.logger.error(f"❌ Sector save error: {e}", exc_info=True)
 
     def _default_symbols(self) -> List[str]:
         """Fallback TASI symbols."""
