@@ -158,6 +158,45 @@ CREATE TRIGGER trigger_update_bot_status
     FOR EACH ROW
     EXECUTE FUNCTION bots.update_status_timestamp();
 
+-- ── إضافة الأعمدة الناقصة إذا لم تكن موجودة ────────────────────
+-- (الجدول قد يكون موجوداً من init_db.sql بدون هذه الأعمدة)
+DO $$
+BEGIN
+    -- عمود next_run
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'bots'
+          AND table_name   = 'status'
+          AND column_name  = 'next_run'
+    ) THEN
+        ALTER TABLE bots.status ADD COLUMN next_run TIMESTAMPTZ;
+        RAISE NOTICE 'Added column bots.status.next_run';
+    END IF;
+
+    -- عمود metadata
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'bots'
+          AND table_name   = 'status'
+          AND column_name  = 'metadata'
+    ) THEN
+        ALTER TABLE bots.status ADD COLUMN metadata JSONB;
+        RAISE NOTICE 'Added column bots.status.metadata';
+    END IF;
+
+    -- عمود updated_at (قد يكون موجوداً باسم مختلف)
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'bots'
+          AND table_name   = 'status'
+          AND column_name  = 'updated_at'
+    ) THEN
+        ALTER TABLE bots.status ADD COLUMN updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+        RAISE NOTICE 'Added column bots.status.updated_at';
+    END IF;
+END
+$$;
+
 -- ── البيانات الافتراضية: الـ 18 روبوت ────────────────────────
 -- يُدرج كل روبوت بحالة 'stopped' إذا لم يكن موجوداً
 -- ON CONFLICT DO NOTHING: لا يُعدّل الروبوتات التي تم تحديثها
