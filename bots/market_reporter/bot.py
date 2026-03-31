@@ -68,6 +68,11 @@ class MarketReporter:
         self._subscribed_syms: List[str] = []
         self._candles_saved = 0
 
+        # Queue لنقل الشموع من WebSocket thread إلى async consumer
+        # run_coroutine_threadsafe يُجدول لكن قد لا يُنفَّذ إذا كان الـ loop مشغولاً
+        # الحل: Queue + consumer task مستقل يعمل دائماً
+        self._candle_queue: asyncio.Queue = None  # يُهيَّأ في run()
+
         self.logger.info("✅ MarketReporter initialized (Async)")
 
     def _load_config(self):
@@ -90,9 +95,13 @@ class MarketReporter:
         self.logger.info("🚀 MarketReporter starting...")
 
         # حفظ الـ event loop الرئيسي لاستخدامه في الـ callback القادم من WebSocket thread
-        # asyncio.get_event_loop() في Python 3.10+ يُنشئ loop جديد في threads الفرعية
-        # لذا يجب حفظه هنا بينما نحن في الـ main coroutine
         self._main_loop = asyncio.get_running_loop()
+
+        # تهيئة Queue لنقل الشموع من WebSocket thread إلى async consumer
+        self._candle_queue = asyncio.Queue(maxsize=10000)
+
+        # بدء consumer task مستقل يحفظ الشموع في DB بشكل مستمر
+        asyncio.create_task(self._candle_db_consumer())
 
         try:
             self.sahmk = get_sahmk_client()
@@ -381,12 +390,10 @@ class MarketReporter:
         """
         Callback from WebSocket thread (non-async context).
 
-        المشكلة القديمة:
-          asyncio.get_event_loop() في Python 3.10+ يُنشئ loop جديد في threads الفرعية
-          بدلاً من إرجاع الـ loop الرئيسي، فيكون is_running() == False دائماً.
-
-        الإصلاح:
-          نحفظ الـ loop الرئيسي في self._main_loop عند بدء run() ونستخدمه هنا.
+        الإصلاح النهائي:
+          بدلاً من run_coroutine_threadsafe (يُجدول لكن قد لا يُنفَّذ إذا كان الـ loop مشغولاً
+          بعمليات طويلة كجلب البيانات التاريخية)، نضع الشمعة في Queue thread-safe.
+          consumer task مستقل يقرأ من الـ Queue ويحفظ في DB بشكل مستمر.
         """
         # ── Redis (sync) ──────────────────────────────────────────────────────────
         try:
@@ -402,20 +409,79 @@ class MarketReporter:
         except Exception as e:
             self.logger.error(f"❌ Redis candle save error: {e}")
 
-        # ── DB (async → عبر run_coroutine_threadsafe) ────────────────────────────
-        try:
-            loop = getattr(self, '_main_loop', None)
-            if loop is not None and loop.is_running():
-                asyncio.run_coroutine_threadsafe(
-                    self._save_candle_to_db(candle), loop
-                )
-            else:
-                # لم يُسجّل الـ loop بعد (run() لم يُستدع بعد)
+        # ── DB (async → عبر Queue thread-safe) ──────────────────────────────────
+        loop = getattr(self, '_main_loop', None)
+        queue = getattr(self, '_candle_queue', None)
+        if loop is not None and queue is not None and loop.is_running():
+            try:
+                # put_nowait لا يحتاج await — آمن من threads
+                loop.call_soon_threadsafe(queue.put_nowait, candle)
+            except asyncio.QueueFull:
                 self.logger.warning(
-                    f"⚠️ Candle for {candle['symbol']} received before main loop ready — skipped DB save"
+                    f"⚠️ Candle queue full — dropping candle for {candle['symbol']}"
                 )
-        except Exception as e:
-            self.logger.error(f"❌ DB candle schedule error for {candle['symbol']}: {e}")
+            except Exception as e:
+                self.logger.error(f"❌ Queue put error for {candle['symbol']}: {e}")
+        else:
+            self.logger.warning(
+                f"⚠️ Candle for {candle['symbol']} received before main loop ready — skipped DB save"
+            )
+
+    async def _candle_db_consumer(self):
+        """
+        Consumer task مستقل يقرأ الشموع من الـ Queue ويحفظها في DB.
+        يعمل بشكل مستمر طوال عمر البوت — لا يتوقف حتى لو كان الـ loop مشغولاً
+        بعمليات أخرى (جلب تاريخي، فلترة، إلخ).
+        """
+        self.logger.info("🗄️  Candle DB consumer started — waiting for candles...")
+        batch: List[Dict] = []
+        BATCH_SIZE = 50       # احفظ كل 50 شمعة دفعة واحدة
+        FLUSH_INTERVAL = 5.0  # أو كل 5 ثوانٍ على الأكثر
+
+        last_flush = asyncio.get_event_loop().time()
+
+        while True:
+            try:
+                # انتظر شمعة جديدة بحد أقصى FLUSH_INTERVAL ثانية
+                timeout = FLUSH_INTERVAL - (asyncio.get_event_loop().time() - last_flush)
+                timeout = max(0.1, timeout)
+                try:
+                    candle = await asyncio.wait_for(
+                        self._candle_queue.get(), timeout=timeout
+                    )
+                    batch.append(candle)
+                    self._candle_queue.task_done()
+                except asyncio.TimeoutError:
+                    pass  # flush ما تراكم
+
+                # flush إذا امتلأت الـ batch أو انتهى الـ interval
+                now = asyncio.get_event_loop().time()
+                should_flush = (
+                    len(batch) >= BATCH_SIZE or
+                    (batch and (now - last_flush) >= FLUSH_INTERVAL)
+                )
+
+                if should_flush and batch:
+                    saved = 0
+                    for c in batch:
+                        try:
+                            await self._save_candle_to_db(c)
+                            saved += 1
+                        except Exception as e:
+                            self.logger.error(
+                                f"❌ Consumer DB save error [{c.get('symbol')}]: {e}"
+                            )
+                    if saved > 0:
+                        self.logger.debug(
+                            f"🗄️  Flushed {saved}/{len(batch)} candles to DB "
+                            f"(queue size: {self._candle_queue.qsize()})"
+                        )
+                    batch.clear()
+                    last_flush = now
+
+            except Exception as e:
+                self.logger.error(f"❌ Candle consumer error: {e}", exc_info=True)
+                await asyncio.sleep(1)
 
     # ═══════════════════════════════════════════════════════════════════════
     # Historical Data (Async & Parallel)
