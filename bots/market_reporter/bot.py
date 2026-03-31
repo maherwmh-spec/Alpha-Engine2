@@ -89,6 +89,11 @@ class MarketReporter:
         """Main async entry point - starts all data collection (LONG-RUNNING)."""
         self.logger.info("🚀 MarketReporter starting...")
 
+        # حفظ الـ event loop الرئيسي لاستخدامه في الـ callback القادم من WebSocket thread
+        # asyncio.get_event_loop() في Python 3.10+ يُنشئ loop جديد في threads الفرعية
+        # لذا يجب حفظه هنا بينما نحن في الـ main coroutine
+        self._main_loop = asyncio.get_running_loop()
+
         try:
             self.sahmk = get_sahmk_client()
             self.sahmk.set_on_candle_complete(self._on_candle_complete)
@@ -374,11 +379,16 @@ class MarketReporter:
 
     def _on_candle_complete(self, candle: Dict):
         """
-        Callback from WebSocket thread.
-        DB save is async → offload to event loop.
-        Redis set is SYNC → call directly.
+        Callback from WebSocket thread (non-async context).
+
+        المشكلة القديمة:
+          asyncio.get_event_loop() في Python 3.10+ يُنشئ loop جديد في threads الفرعية
+          بدلاً من إرجاع الـ loop الرئيسي، فيكون is_running() == False دائماً.
+
+        الإصلاح:
+          نحفظ الـ loop الرئيسي في self._main_loop عند بدء run() ونستخدمه هنا.
         """
-        # Save to Redis synchronously (no await needed)
+        # ── Redis (sync) ──────────────────────────────────────────────────────────
         try:
             redis_manager.set(
                 f"ohlcv:1m:{candle['symbol']}:latest",
@@ -387,20 +397,25 @@ class MarketReporter:
                 ttl=120
             )
             self._candles_saved += 1
-            if self._candles_saved % 500 == 0:
-                self.logger.info(f"📈 {self._candles_saved} candles saved to DB.")
+            if self._candles_saved % 100 == 0:
+                self.logger.info(f"📈 {self._candles_saved} candles processed (Redis+DB).")
         except Exception as e:
             self.logger.error(f"❌ Redis candle save error: {e}")
 
-        # Save to DB asynchronously via event loop
+        # ── DB (async → عبر run_coroutine_threadsafe) ────────────────────────────
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
+            loop = getattr(self, '_main_loop', None)
+            if loop is not None and loop.is_running():
                 asyncio.run_coroutine_threadsafe(
                     self._save_candle_to_db(candle), loop
                 )
-        except RuntimeError:
-            pass  # No running event loop — skip async DB save
+            else:
+                # لم يُسجّل الـ loop بعد (run() لم يُستدع بعد)
+                self.logger.warning(
+                    f"⚠️ Candle for {candle['symbol']} received before main loop ready — skipped DB save"
+                )
+        except Exception as e:
+            self.logger.error(f"❌ DB candle schedule error for {candle['symbol']}: {e}")
 
     # ═══════════════════════════════════════════════════════════════════════
     # Historical Data (Async & Parallel)
