@@ -314,6 +314,15 @@ SECTOR_NAMES: Dict[str, str] = {
 }
 
 
+# alias للتوافق مع الاستيرادات الخارجية
+SECTOR_DISPLAY_NAMES: Dict[str, str] = SECTOR_NAMES
+
+
+def is_sector_symbol(symbol: str) -> bool:
+    """يُعيد True إذا كان الرمز قطاعاً أو مؤشراً (900xx)."""
+    return str(symbol).startswith('9') and len(str(symbol)) == 5
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # الدالة الرئيسية (async — تستخدم asyncpg connection)
 # ─────────────────────────────────────────────────────────────────────────────

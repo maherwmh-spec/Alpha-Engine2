@@ -34,10 +34,8 @@ from loguru import logger
 
 from config.config_manager import config
 from scripts.redis_manager import redis_manager
-from scripts.saudi_exchange_scraper import (
+from scripts.sector_calculator import (
     is_sector_symbol,
-    get_tasi_candle,
-    get_all_sector_candles,
     SECTOR_DISPLAY_NAMES,
 )
 
@@ -510,31 +508,17 @@ class SahmkClient:
 
     def get_sector_snapshot(self, symbol: str) -> Optional[Dict]:
         """
-        [مُهمَل — استخدم saudi_exchange_scraper.get_all_sector_candles() بدلاً منه]
+        [مُهمَل — بيانات القطاعات تُحسب من DB عبر sector_calculator في _sector_polling_loop]
 
         Sahmk API يعطي 404 لكل رموز 900xx.
-        هذه الدالة تُحوَّل تلقائياً إلى Saudi Exchange scraper.
+        Saudi Exchange محجوب بـ Cloudflare من IP الخادم.
+        الحل الصحيح: حساب VWAP من بيانات الأسهم في DB.
         """
         if is_sector_symbol(symbol):
             self.logger.debug(
-                f"⏭️  get_sector_snapshot({symbol}): redirecting to Saudi Exchange scraper"
+                f"⏭️  get_sector_snapshot({symbol}): sector data computed via DB calculator"
             )
-            from scripts.saudi_exchange_scraper import get_all_sector_candles
-            all_candles = get_all_sector_candles()
-            candle = all_candles.get(symbol)
-            if candle:
-                # تحويل شكل الشمعة إلى الشكل القديم المتوقع
-                return {
-                    'symbol':    candle['symbol'],
-                    'price':     candle['close'],
-                    'open':      candle['open'],
-                    'high':      candle['high'],
-                    'low':       candle['low'],
-                    'close':     candle['close'],
-                    'volume':    candle['volume'],
-                    'timestamp': candle['timestamp'],
-                }
-            return None
+            return None  # لا تستخدم هذه الدالة للقطاعات — استخدم _sector_polling_loop
 
         # للأسهم العادية: استخدم Sahmk quote endpoint
         try:
@@ -767,7 +751,7 @@ class SahmkClient:
 
         يُصفّي رموز القطاعات (900xx) تلقائياً قبل إرسالها لـ Sahmk WebSocket،
         لأن Sahmk لا يرسل أي ticks لها رغم قبول الاشتراك.
-        بيانات القطاعات تُجلب بشكل منفصل عبر Saudi Exchange scraper.
+        بيانات القطاعات تُحسب من بيانات الأسهم في DB عبر sector_calculator.
         """
         if self._ws_running:
             self.logger.warning("⚠️ WebSocket already running")
@@ -780,7 +764,7 @@ class SahmkClient:
         if sector_symbols:
             self.logger.info(
                 f"⏭️  Excluding {len(sector_symbols)} sector/index symbols from WebSocket "
-                f"(will be fetched via Saudi Exchange scraper): {sector_symbols[:5]}..."
+                f"(will be computed from DB via sector_calculator): {sector_symbols[:5]}..."
             )
 
         self._subscribed_symbols = stock_symbols

@@ -33,19 +33,18 @@ from config.config_manager import config
 from scripts.redis_manager import redis_manager
 from scripts.sahmk_client import SahmkClient, get_sahmk_client
 from scripts.utils import get_saudi_time, is_trading_hours
-from scripts.saudi_exchange_scraper import (
-    get_all_sector_candles,
+from scripts.sector_calculator import (
+    compute_sector_candles_from_db,
     is_sector_symbol,
     SECTOR_DISPLAY_NAMES,
 )
-from scripts.sector_calculator import compute_sector_candles_from_db
 
 # --- Constants ---
 DB_POOL: Optional[asyncpg.Pool] = None
 FETCH_CONCURRENCY = 20  # Number of symbols to fetch in parallel
 
 
-# قاموس أسماء القطاعات — مصدره الآن saudi_exchange_scraper (مصدر واحد للحقيقة)
+# قاموس أسماء القطاعات — مصدره sector_calculator
 SECTOR_NAMES: Dict[str, str] = SECTOR_DISPLAY_NAMES
 
 
@@ -100,9 +99,6 @@ class MarketReporter:
         # تهيئة Queue لنقل الشموع من WebSocket thread إلى async consumer
         self._candle_queue = asyncio.Queue(maxsize=10000)
 
-        # بدء consumer task مستقل يحفظ الشموع في DB بشكل مستمر
-        asyncio.create_task(self._candle_db_consumer())
-
         try:
             self.sahmk = get_sahmk_client()
             self.sahmk.set_on_candle_complete(self._on_candle_complete)
@@ -114,6 +110,11 @@ class MarketReporter:
             return
 
         await self._init_db_pool()
+
+        # بدء consumer task مستقل يحفظ الشموع في DB بشكل مستمر
+        # يُبدأ بعد _init_db_pool لضمان أن DB_POOL جاهز
+        asyncio.create_task(self._candle_db_consumer())
+        self.logger.success("✅ Candle DB consumer task started")
 
         # --- Main Loop ---
         while True:
@@ -189,7 +190,7 @@ class MarketReporter:
         Schema PK: (time, symbol, timeframe)  — timeframe is required.
         volume is bigint → must be int, not float.
 
-        للقطاعات (900xx): source = 'saudi_exchange_scraper'
+        للقطاعات (900xx): source = 'db_sector_calculator'
         للأسهم العادية:   source = 'sahmk_websocket'
         """
         if DB_POOL is None:
@@ -205,7 +206,7 @@ class MarketReporter:
         # تحديد المصدر بناءً على نوع الرمز
         symbol = candle['symbol']
         source = candle.get('source') or (
-            'saudi_exchange_scraper' if is_sector_symbol(symbol) else 'sahmk_websocket'
+            'db_sector_calculator' if is_sector_symbol(symbol) else 'sahmk_websocket'
         )
         name = SECTOR_NAMES.get(symbol) or candle.get('name') or 'Unknown'
 
@@ -438,12 +439,13 @@ class MarketReporter:
         BATCH_SIZE = 50       # احفظ كل 50 شمعة دفعة واحدة
         FLUSH_INTERVAL = 5.0  # أو كل 5 ثوانٍ على الأكثر
 
-        last_flush = asyncio.get_event_loop().time()
+        last_flush = asyncio.get_running_loop().time()
 
         while True:
             try:
                 # انتظر شمعة جديدة بحد أقصى FLUSH_INTERVAL ثانية
-                timeout = FLUSH_INTERVAL - (asyncio.get_event_loop().time() - last_flush)
+                now = asyncio.get_running_loop().time()
+                timeout = FLUSH_INTERVAL - (now - last_flush)
                 timeout = max(0.1, timeout)
                 try:
                     candle = await asyncio.wait_for(
@@ -455,7 +457,7 @@ class MarketReporter:
                     pass  # flush ما تراكم
 
                 # flush إذا امتلأت الـ batch أو انتهى الـ interval
-                now = asyncio.get_event_loop().time()
+                now = asyncio.get_running_loop().time()
                 should_flush = (
                     len(batch) >= BATCH_SIZE or
                     (batch and (now - last_flush) >= FLUSH_INTERVAL)
@@ -471,11 +473,10 @@ class MarketReporter:
                             self.logger.error(
                                 f"❌ Consumer DB save error [{c.get('symbol')}]: {e}"
                             )
-                    if saved > 0:
-                        self.logger.debug(
-                            f"🗄️  Flushed {saved}/{len(batch)} candles to DB "
-                            f"(queue size: {self._candle_queue.qsize()})"
-                        )
+                    self.logger.info(
+                        f"🗄️  Flushed {saved}/{len(batch)} candles to DB "
+                        f"(queue size: {self._candle_queue.qsize()})"
+                    )
                     batch.clear()
                     last_flush = now
 
@@ -514,19 +515,15 @@ class MarketReporter:
         """
         Fetch historical data for all symbols concurrently.
 
-        القطاعات (900xx): تُستبعد من Sahmk ويُجلب snapshot واحد من Saudi Exchange
-        للإطار 1m فقط (لا توجد بيانات تاريخية للقطاعات).
+        القطاعات (900xx): تُستبعد تماماً من هنا — لا توجد بيانات تاريخية لها.
+        بياناتها اللحظية تُحسب من الأسهم في DB عبر _sector_polling_loop.
         """
-        stock_symbols  = [s for s in symbols if not is_sector_symbol(s)]
-        sector_symbols = [s for s in symbols if is_sector_symbol(s)]
+        stock_symbols = [s for s in symbols if not is_sector_symbol(s)]
 
         self.logger.info(
-            f"📊 Fetching historical data | "
-            f"{len(stock_symbols)} stocks via Sahmk + "
-            f"{len(sector_symbols)} sectors via Saudi Exchange (1m only)"
+            f"📊 Fetching historical data ({timeframe}) | {len(stock_symbols)} stocks via Sahmk"
         )
 
-        # ── الأسهم العادية: Sahmk REST API ──────────────────────────────────
         semaphore = asyncio.Semaphore(FETCH_CONCURRENCY)
         tasks = [
             self._fetch_and_log(sym, timeframe, days, semaphore)
@@ -537,29 +534,6 @@ class MarketReporter:
         self.logger.success(
             f"✅ Stocks historical fetch ({timeframe}) | ✅{ok} ❌{len(stock_symbols) - ok}"
         )
-
-        # ── القطاعات: snapshot لحظي من Saudi Exchange (1m فقط) ──────────────
-        if sector_symbols and timeframe == '1m':
-            self.logger.info(
-                f"📊 Fetching sector snapshots from Saudi Exchange for {len(sector_symbols)} symbols..."
-            )
-            try:
-                all_candles = await asyncio.to_thread(get_all_sector_candles)
-                saved = 0
-                for sym in sector_symbols:
-                    candle = all_candles.get(sym)
-                    if candle:
-                        await self._save_candle_to_db(candle)
-                        saved += 1
-                self.logger.success(
-                    f"✅ Sector snapshots saved: {saved}/{len(sector_symbols)}"
-                )
-            except Exception as e:
-                self.logger.error(f"❌ Sector historical fetch error: {e}")
-        elif sector_symbols:
-            self.logger.debug(
-                f"⏭️  Skipping sector fetch for timeframe={timeframe} (only 1m supported)"
-            )
 
     async def _fetch_and_log(
         self, symbol: str, timeframe: str, days: int, semaphore: asyncio.Semaphore
@@ -688,21 +662,10 @@ class MarketReporter:
                 self.logger.warning(f"⚠️ DB sector calculator error: {e}")
                 all_candles = {}
 
-            # ── المصدر الاحتياطي: Saudi Exchange scraper ──────────────────
-            if not all_candles:
-                self.logger.info(
-                    "🔄 DB calculator returned no data — trying Saudi Exchange scraper..."
-                )
-                try:
-                    all_candles = await asyncio.to_thread(get_all_sector_candles)
-                except Exception as e:
-                    self.logger.error(f"❌ Saudi Exchange scraper error: {e}")
-                    all_candles = {}
-
             if not all_candles:
                 self.logger.warning(
-                    "⚠️ Both sources failed — no sector data this cycle. "
-                    "Check DB has recent 1m stock data."
+                    "⚠️ DB calculator returned no data — "
+                    "waiting for stock candles to accumulate in DB (normal at startup)"
                 )
                 continue
 
