@@ -38,8 +38,12 @@ MIN_HISTORICAL_CANDLES = 30
 # نافذة حساب المتوسط التاريخي (عدد الأيام)
 HISTORICAL_WINDOW_DAYS = 30
 
-# نافذة الحجم الحالي (عدد الدقائق الأخيرة)
+# نافذة الحجم الحالي (عدد الدقائق الأخيرة) — تُستخدم فقط أثناء التداول
 CURRENT_WINDOW_MINUTES = 60
+
+# ساعات التداول (KSA = UTC+3)
+MARKET_OPEN_HOUR_KSA  = 10   # 10:00 KSA
+MARKET_CLOSE_HOUR_KSA = 15   # 15:00 KSA
 
 # مفتاح Redis للكاش
 UNIVERSE_CACHE_KEY = "symbol_universe:active"
@@ -84,6 +88,54 @@ class SymbolUniverse:
 
     # ── حساب السيولة التاريخية الخاصة بكل سهم ─────────────────────────────────
 
+    def _is_market_open(self) -> bool:
+        """هل السوق مفتوحة الآن؟"""
+        from datetime import timezone
+        now_ksa = datetime.now(timezone.utc) + timedelta(hours=3)
+        # الأحد=6, الاثنين=0, ... الخميس=4, الجمعة=5, السبت=6
+        weekday = now_ksa.weekday()  # Monday=0 ... Sunday=6
+        # تداول: الأحد(6) - الخميس(3)
+        is_trading_day = weekday in (6, 0, 1, 2, 3)
+        is_trading_hour = MARKET_OPEN_HOUR_KSA <= now_ksa.hour < MARKET_CLOSE_HOUR_KSA
+        return is_trading_day and is_trading_hour
+
+    def _get_last_session_window(self) -> Tuple[datetime, datetime]:
+        """
+        يُعيد نافذة زمنية تمثّل آخر جلسة تداول مكتملة أو الجلسة الحالية.
+
+        أثناء التداول: آخر 60 دقيقة من الآن.
+        خارج التداول: آخر يوم تداول كامل (من 10:00 إلى 15:00 KSA).
+        """
+        from datetime import timezone
+        now_ksa = datetime.now(timezone.utc) + timedelta(hours=3)
+        now_utc = datetime.now(timezone.utc)
+
+        if self._is_market_open():
+            # أثناء التداول: آخر 60 دقيقة
+            return now_utc - timedelta(minutes=60), now_utc
+
+        # خارج التداول: نبحث عن آخر يوم تداول
+        # نرجع للخلف حتى نجد يوم تداول
+        candidate = now_ksa.date()
+        for _ in range(7):
+            wd = candidate.weekday()
+            if wd in (6, 0, 1, 2, 3):  # أحد-خميس
+                break
+            candidate -= timedelta(days=1)
+
+        # نافذة آخر جلسة: من 10:00 إلى 15:00 KSA بتوقيت UTC
+        from datetime import timezone as tz
+        session_start_ksa = datetime(
+            candidate.year, candidate.month, candidate.day,
+            MARKET_OPEN_HOUR_KSA, 0, 0, tzinfo=tz.utc
+        ) - timedelta(hours=3)  # KSA → UTC
+        session_end_ksa = datetime(
+            candidate.year, candidate.month, candidate.day,
+            MARKET_CLOSE_HOUR_KSA, 0, 0, tzinfo=tz.utc
+        ) - timedelta(hours=3)
+
+        return session_start_ksa, session_end_ksa
+
     def _get_historical_avg_volume(
         self, symbol: str, timeframe: str = '1m', days: int = HISTORICAL_WINDOW_DAYS
     ) -> Optional[float]:
@@ -102,7 +154,7 @@ class SymbolUniverse:
                     FROM market_data.ohlcv
                     WHERE symbol = :symbol
                       AND timeframe = :timeframe
-                      AND time >= NOW() - INTERVAL ':days days'
+                      AND time >= NOW() - (:days * INTERVAL '1 day')
                     GROUP BY DATE_TRUNC('day', time)
                     HAVING SUM(volume) > 0
                     ORDER BY day DESC
@@ -114,10 +166,10 @@ class SymbolUniverse:
                 })
                 rows = result.fetchall()
 
-            if not rows or len(rows) < 3:
+            if not rows or len(rows) < 2:
                 return None
 
-            daily_volumes = [row[1] for row in rows]
+            daily_volumes = [float(row[1]) for row in rows]
             avg = float(np.mean(daily_volumes))
             return avg if avg > 0 else None
 
@@ -126,25 +178,31 @@ class SymbolUniverse:
             return None
 
     def _get_current_volume(
-        self, symbol: str, timeframe: str = '1m', minutes: int = CURRENT_WINDOW_MINUTES
+        self, symbol: str, timeframe: str = '1m'
     ) -> Optional[float]:
         """
-        يحسب إجمالي الحجم في آخر N دقيقة.
-        يُستخدم لمقارنة النشاط الحالي بالمتوسط التاريخي.
+        يحسب إجمالي الحجم في نافذة آخر جلسة تداول.
+
+        أثناء التداول: آخر 60 دقيقة.
+        خارج التداول: آخر جلسة تداول مكتملة (10:00-15:00 KSA).
         """
         try:
+            window_start, window_end = self._get_last_session_window()
+
             with db.get_session() as session:
                 query = text("""
                     SELECT COALESCE(SUM(volume), 0)
                     FROM market_data.ohlcv
                     WHERE symbol = :symbol
                       AND timeframe = :timeframe
-                      AND time >= NOW() - INTERVAL ':minutes minutes'
+                      AND time >= :window_start
+                      AND time <= :window_end
                 """)
                 result = session.execute(query, {
                     'symbol': symbol,
                     'timeframe': timeframe,
-                    'minutes': minutes
+                    'window_start': window_start,
+                    'window_end': window_end
                 })
                 row = result.fetchone()
 
@@ -215,10 +273,17 @@ class SymbolUniverse:
                 'reason': 'no_historical_volume'
             }
 
-        # المقارنة الذاتية: الحجم الحالي (آخر ساعة) مقابل المتوسط اليومي التاريخي
-        # نُحوّل المتوسط اليومي إلى ساعة واحدة للمقارنة العادلة (÷ 5 ساعات تداول)
-        hourly_hist_avg = hist_avg / 5.0
-        volume_ratio = current_vol / hourly_hist_avg if hourly_hist_avg > 0 else 0.0
+        # المقارنة الذاتية:
+        # - أثناء التداول: حجم آخر 60 دقيقة vs متوسط ساعة تداول تاريخي (يومي ÷ 5)
+        # - خارج التداول: حجم آخر جلسة كاملة vs متوسط يوم تداول تاريخي
+        if self._is_market_open():
+            # مقارنة ساعية: المتوسط اليومي ÷ 5 ساعات تداول
+            reference_avg = hist_avg / 5.0
+        else:
+            # مقارنة جلسة كاملة: المتوسط اليومي مباشرة
+            reference_avg = hist_avg
+
+        volume_ratio = current_vol / reference_avg if reference_avg > 0 else 0.0
 
         # التصنيف
         if volume_ratio >= ACTIVITY_THRESHOLDS['ACTIVE']:
