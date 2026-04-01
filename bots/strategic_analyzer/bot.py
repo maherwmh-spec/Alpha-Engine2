@@ -1,683 +1,482 @@
 """
 Bot 4: Strategic Analyzer (المُحلِّل الاستراتيجي)
-Analyzes strategies and generates trading signals
+
+المبدأ الأساسي:
+  - لا توجد استراتيجية ثابتة لأي سهم
+  - لا توجد قائمة ثابتة من الأسهم
+  - كل سهم يُحلَّل بالمعاملات التي اكتشفها الـ Scientist له تحديداً
+  - إذا لم يُحلَّل السهم بعد → يُضاف لقائمة انتظار الـ Scientist
+  - الأسهم تُكتشف ديناميكياً من DB بناءً على سيولتها التاريخية الخاصة
 """
 
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
 from loguru import logger
+import json
 
 from sqlalchemy import text
 from config.config_manager import config
 from scripts.database import db, insert_signal
 from scripts.redis_manager import redis_manager
-from scripts.utils import (
-    get_saudi_time, calculate_percentage_change,
-    is_support_level, is_resistance_level
-)
-import json
+from scripts.utils import get_saudi_time
+from scripts.symbol_universe import symbol_universe
 
 
 class StrategicAnalyzer:
-    """Strategy analysis and signal generation bot"""
-    
+    """
+    المُحلِّل الاستراتيجي — يعمل على كون الأسهم الكامل
+    بمعاملات مخصصة لكل سهم من نتائج الـ Scientist.
+    """
+
     def __init__(self):
         self.name = "strategic_analyzer"
         self.logger = logger.bind(bot=self.name)
-        self.config = config.get_bot_config(self.name)
-        
-        # Load strategy configurations
-        self.strategies = {
-            'aggressive_daily': config.get_strategy_config('aggressive_daily'),
-            'short_waves': config.get_strategy_config('short_waves'),
-            'medium_waves': config.get_strategy_config('medium_waves'),
-            'price_explosions': config.get_strategy_config('price_explosions')
-        }
-    
-    def get_latest_indicators(self, symbol: str, timeframe: str) -> Optional[Dict]:
-        """Get latest technical indicators for a symbol"""
+        self.bot_config = config.get_bot_config(self.name)
+
+    # ── جلب المؤشرات التقنية ───────────────────────────────────────────────────
+
+    def _get_indicators(self, symbol: str, timeframe: str) -> Optional[Dict]:
+        """يجلب آخر مؤشرات تقنية للسهم من DB أو Redis cache."""
         try:
-            # Try cache first
             cached = redis_manager.get_cached_indicators(symbol, timeframe)
             if cached:
                 return cached
-            
-            # Get from database
+
             with db.get_session() as session:
                 query = text("""
-                SELECT rsi, macd, macd_signal, macd_hist,
-                       bb_upper, bb_middle, bb_lower,
-                       ema_9, ema_21, sma_50, sma_200,
-                       atr, stoch_k, stoch_d, adx, obv
-                FROM market_data.technical_indicators
-                WHERE symbol = :symbol AND timeframe = :timeframe
-                ORDER BY time DESC
-                LIMIT 1
+                    SELECT rsi, macd, macd_signal, macd_hist,
+                           bb_upper, bb_middle, bb_lower,
+                           ema_9, ema_21, sma_50, sma_200,
+                           atr, stoch_k, stoch_d, adx, obv
+                    FROM market_data.technical_indicators
+                    WHERE symbol = :symbol AND timeframe = :timeframe
+                    ORDER BY time DESC
+                    LIMIT 1
                 """)
                 result = session.execute(query, {'symbol': symbol, 'timeframe': timeframe})
                 row = result.fetchone()
-            
+
             if not row:
                 return None
-            
-            indicators = {
-                'rsi': row[0],
-                'macd': row[1],
-                'macd_signal': row[2],
-                'macd_hist': row[3],
-                'bb_upper': row[4],
-                'bb_middle': row[5],
-                'bb_lower': row[6],
-                'ema_9': row[7],
-                'ema_21': row[8],
-                'sma_50': row[9],
-                'sma_200': row[10],
-                'atr': row[11],
-                'stoch_k': row[12],
-                'stoch_d': row[13],
-                'adx': row[14],
+
+            return {
+                'rsi': row[0], 'macd': row[1], 'macd_signal': row[2],
+                'macd_hist': row[3], 'bb_upper': row[4], 'bb_middle': row[5],
+                'bb_lower': row[6], 'ema_9': row[7], 'ema_21': row[8],
+                'sma_50': row[9], 'sma_200': row[10], 'atr': row[11],
+                'stoch_k': row[12], 'stoch_d': row[13], 'adx': row[14],
                 'obv': row[15]
             }
-            
-            return indicators
-            
+
         except Exception as e:
-            self.logger.error(f"Error getting indicators for {symbol}: {e}")
+            self.logger.debug(f"No indicators for {symbol}/{timeframe}: {e}")
             return None
-    
-    def analyze_aggressive_daily(self, symbol: str) -> Optional[Dict]:
-        """
-        Analyze for aggressive daily strategy (1-3% quick trades)
-        Timeframe: 1m
-        """
+
+    def _get_ohlcv(self, symbol: str, timeframe: str, limit: int = 50) -> Optional[pd.DataFrame]:
+        """يجلب بيانات OHLCV الأخيرة للسهم."""
         try:
-            strategy = self.strategies['aggressive_daily']
-            if not strategy.get('enabled', False):
-                return None
-            
-            timeframe = strategy.get('timeframe', '1m')
-            indicators = self.get_latest_indicators(symbol, timeframe)
-            
-            if not indicators:
-                return None
-            
-            # Get current price
-            current_price = redis_manager.get_cached_price(symbol)
-            if not current_price:
-                return None
-            
-            price = current_price.get('close', 0)
-            if price == 0:
-                return None
-            
-            # Signal generation logic
-            signal_type = 'HOLD'
-            confidence = 0.0
-            reasons = []
-            
-            # RSI oversold/overbought
-            if indicators['rsi'] and indicators['rsi'] < 30:
-                signal_type = 'BUY'
-                confidence += 0.3
-                reasons.append('RSI oversold')
-            elif indicators['rsi'] and indicators['rsi'] > 70:
-                signal_type = 'SELL'
-                confidence += 0.3
-                reasons.append('RSI overbought')
-            
-            # MACD crossover
-            if indicators['macd'] and indicators['macd_signal']:
-                if indicators['macd'] > indicators['macd_signal'] and indicators['macd_hist'] > 0:
-                    if signal_type == 'BUY':
-                        confidence += 0.2
-                    else:
-                        signal_type = 'BUY'
-                        confidence += 0.15
-                    reasons.append('MACD bullish crossover')
-                elif indicators['macd'] < indicators['macd_signal'] and indicators['macd_hist'] < 0:
-                    if signal_type == 'SELL':
-                        confidence += 0.2
-                    else:
-                        signal_type = 'SELL'
-                        confidence += 0.15
-                    reasons.append('MACD bearish crossover')
-            
-            # Bollinger Bands
-            if indicators['bb_lower'] and indicators['bb_upper']:
-                if price <= indicators['bb_lower']:
-                    if signal_type == 'BUY':
-                        confidence += 0.25
-                    else:
-                        signal_type = 'BUY'
-                        confidence += 0.15
-                    reasons.append('Price at lower Bollinger Band')
-                elif price >= indicators['bb_upper']:
-                    if signal_type == 'SELL':
-                        confidence += 0.25
-                    else:
-                        signal_type = 'SELL'
-                        confidence += 0.15
-                    reasons.append('Price at upper Bollinger Band')
-            
-            # Stochastic
-            if indicators['stoch_k'] and indicators['stoch_d']:
-                if indicators['stoch_k'] < 20 and indicators['stoch_d'] < 20:
-                    if signal_type == 'BUY':
-                        confidence += 0.15
-                    reasons.append('Stochastic oversold')
-                elif indicators['stoch_k'] > 80 and indicators['stoch_d'] > 80:
-                    if signal_type == 'SELL':
-                        confidence += 0.15
-                    reasons.append('Stochastic overbought')
-            
-            # Normalize confidence
-            confidence = min(confidence, 1.0)
-            
-            if signal_type != 'HOLD' and confidence >= 0.5:
-                result = {
-                    'strategy': 'aggressive_daily',
-                    'symbol': symbol,
-                    'signal': signal_type,
-                    'confidence': confidence,
-                    'price': price,
-                    'timeframe': timeframe,
-                    'reasons': reasons,
-                    'timestamp': get_saudi_time()
-                }
-                
-                self.logger.info(f"Signal: {symbol} - {signal_type} (confidence: {confidence:.2f})")
-                return result
-            
-            return None
-            
-        except Exception as e:
-            self.logger.error(f"Error analyzing aggressive_daily for {symbol}: {e}")
-            return None
-    
-    def analyze_short_waves(self, symbol: str) -> Optional[Dict]:
-        """
-        Analyze for short waves strategy (1-7 days)
-        Timeframe: 5m
-        """
-        try:
-            strategy = self.strategies['short_waves']
-            if not strategy.get('enabled', False):
-                return None
-            
-            timeframe = strategy.get('timeframe', '5m')
-            indicators = self.get_latest_indicators(symbol, timeframe)
-            
-            if not indicators:
-                return None
-            
-            current_price = redis_manager.get_cached_price(symbol)
-            if not current_price:
-                return None
-            
-            price = current_price.get('close', 0)
-            
-            signal_type = 'HOLD'
-            confidence = 0.0
-            reasons = []
-            
-            # EMA crossover (9 and 21)
-            if indicators['ema_9'] and indicators['ema_21']:
-                if indicators['ema_9'] > indicators['ema_21']:
-                    signal_type = 'BUY'
-                    confidence += 0.35
-                    reasons.append('EMA 9 > EMA 21')
-                elif indicators['ema_9'] < indicators['ema_21']:
-                    signal_type = 'SELL'
-                    confidence += 0.35
-                    reasons.append('EMA 9 < EMA 21')
-            
-            # ADX for trend strength
-            if indicators['adx'] and indicators['adx'] > 25:
-                confidence += 0.2
-                reasons.append(f'Strong trend (ADX: {indicators["adx"]:.1f})')
-            
-            # RSI confirmation
-            if indicators['rsi']:
-                if signal_type == 'BUY' and 40 < indicators['rsi'] < 60:
-                    confidence += 0.15
-                    reasons.append('RSI in neutral zone')
-                elif signal_type == 'SELL' and 40 < indicators['rsi'] < 60:
-                    confidence += 0.15
-                    reasons.append('RSI in neutral zone')
-            
-            # Volume confirmation (OBV)
-            if indicators['obv']:
-                # Get previous OBV
-                with db.get_session() as session:
-                    query = text("""
-                    SELECT obv FROM market_data.technical_indicators
-                    WHERE symbol = :symbol AND timeframe = :timeframe
-                    ORDER BY time DESC
-                    LIMIT 2
-                    """)
-                    result = session.execute(query, {'symbol': symbol, 'timeframe': timeframe})
-                    obv_values = [row[0] for row in result.fetchall()]
-                
-                if len(obv_values) >= 2:
-                    if signal_type == 'BUY' and obv_values[0] > obv_values[1]:
-                        confidence += 0.15
-                        reasons.append('Volume increasing')
-                    elif signal_type == 'SELL' and obv_values[0] < obv_values[1]:
-                        confidence += 0.15
-                        reasons.append('Volume decreasing')
-            
-            confidence = min(confidence, 1.0)
-            
-            if signal_type != 'HOLD' and confidence >= 0.6:
-                result = {
-                    'strategy': 'short_waves',
-                    'symbol': symbol,
-                    'signal': signal_type,
-                    'confidence': confidence,
-                    'price': price,
-                    'timeframe': timeframe,
-                    'reasons': reasons,
-                    'timestamp': get_saudi_time()
-                }
-                
-                self.logger.info(f"Signal: {symbol} - {signal_type} (confidence: {confidence:.2f})")
-                return result
-            
-            return None
-            
-        except Exception as e:
-            self.logger.error(f"Error analyzing short_waves for {symbol}: {e}")
-            return None
-    
-    def analyze_medium_waves(self, symbol: str) -> Optional[Dict]:
-        """
-        Analyze for medium waves strategy (1-2 weeks)
-        Timeframe: 1h
-        """
-        try:
-            strategy = self.strategies['medium_waves']
-            if not strategy.get('enabled', False):
-                return None
-            
-            timeframe = strategy.get('timeframe', '1h')
-            indicators = self.get_latest_indicators(symbol, timeframe)
-            
-            if not indicators:
-                return None
-            
-            current_price = redis_manager.get_cached_price(symbol)
-            if not current_price:
-                return None
-            
-            price = current_price.get('close', 0)
-            
-            signal_type = 'HOLD'
-            confidence = 0.0
-            reasons = []
-            
-            # SMA crossover (50 and 200) - Golden/Death Cross
-            if indicators['sma_50'] and indicators['sma_200']:
-                if indicators['sma_50'] > indicators['sma_200']:
-                    signal_type = 'BUY'
-                    confidence += 0.4
-                    reasons.append('Golden Cross (SMA 50 > SMA 200)')
-                elif indicators['sma_50'] < indicators['sma_200']:
-                    signal_type = 'SELL'
-                    confidence += 0.4
-                    reasons.append('Death Cross (SMA 50 < SMA 200)')
-            
-            # Price position relative to SMAs
-            if indicators['sma_50']:
-                if price > indicators['sma_50']:
-                    if signal_type == 'BUY':
-                        confidence += 0.2
-                        reasons.append('Price above SMA 50')
-                else:
-                    if signal_type == 'SELL':
-                        confidence += 0.2
-                        reasons.append('Price below SMA 50')
-            
-            # MACD confirmation
-            if indicators['macd'] and indicators['macd_signal']:
-                if signal_type == 'BUY' and indicators['macd'] > indicators['macd_signal']:
-                    confidence += 0.2
-                    reasons.append('MACD confirms bullish')
-                elif signal_type == 'SELL' and indicators['macd'] < indicators['macd_signal']:
-                    confidence += 0.2
-                    reasons.append('MACD confirms bearish')
-            
-            # ADX for trend strength
-            if indicators['adx'] and indicators['adx'] > 30:
-                confidence += 0.15
-                reasons.append(f'Very strong trend (ADX: {indicators["adx"]:.1f})')
-            
-            confidence = min(confidence, 1.0)
-            
-            if signal_type != 'HOLD' and confidence >= 0.7:
-                result = {
-                    'strategy': 'medium_waves',
-                    'symbol': symbol,
-                    'signal': signal_type,
-                    'confidence': confidence,
-                    'price': price,
-                    'timeframe': timeframe,
-                    'reasons': reasons,
-                    'timestamp': get_saudi_time()
-                }
-                
-                self.logger.info(f"Signal: {symbol} - {signal_type} (confidence: {confidence:.2f})")
-                return result
-            
-            return None
-            
-        except Exception as e:
-            self.logger.error(f"Error analyzing medium_waves for {symbol}: {e}")
-            return None
-    
-    def analyze_price_explosions(self, symbol: str) -> Optional[Dict]:
-        """
-        Analyze for price explosions strategy (rare high-profit opportunities)
-        Timeframe: 1d
-        """
-        try:
-            strategy = self.strategies['price_explosions']
-            if not strategy.get('enabled', False):
-                return None
-            
-            timeframe = strategy.get('timeframe', '1d')
-            
-            # Get recent price data
             with db.get_session() as session:
                 query = text("""
-                SELECT close, volume FROM market_data.stock_prices
-                WHERE symbol = :symbol AND timeframe = :timeframe
-                ORDER BY time DESC
-                LIMIT 30
+                    SELECT time, open, high, low, close, volume
+                    FROM market_data.ohlcv
+                    WHERE symbol = :symbol AND timeframe = :timeframe
+                    ORDER BY time DESC
+                    LIMIT :limit
                 """)
-                result = session.execute(query, {'symbol': symbol, 'timeframe': timeframe})
-                data = result.fetchall()
-            
-            if len(data) < 10:
+                result = session.execute(query, {
+                    'symbol': symbol, 'timeframe': timeframe, 'limit': limit
+                })
+                rows = result.fetchall()
+
+            if not rows or len(rows) < 10:
                 return None
-            
-            prices = [row[0] for row in data]
-            volumes = [row[1] for row in data]
-            
-            current_price = prices[0]
-            avg_price_20 = np.mean(prices[:20])
-            avg_volume_20 = np.mean(volumes[:20])
-            
+
+            df = pd.DataFrame(rows, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
+            df['time'] = pd.to_datetime(df['time'])
+            df = df.sort_values('time').reset_index(drop=True)
+            df[['open', 'high', 'low', 'close']] = df[['open', 'high', 'low', 'close']].astype(float)
+            df['volume'] = df['volume'].fillna(0).astype(float)
+            return df
+
+        except Exception as e:
+            self.logger.debug(f"No OHLCV for {symbol}/{timeframe}: {e}")
+            return None
+
+    # ── المحرك الاستكشافي: تحليل بمعاملات الـ Scientist ──────────────────────
+
+    def _analyze_with_scientist_params(
+        self, symbol: str, scientist_result: Dict
+    ) -> Optional[Dict]:
+        """
+        يُحلِّل السهم باستخدام المعاملات المُكتشَفة من الـ Scientist.
+        هذه هي الاستراتيجية "الأفضل" لهذا السهم تحديداً.
+
+        المعاملات المُستخدَمة من نتائج الـ Scientist:
+          - rsi_period, rsi_buy, rsi_sell
+          - bb_period, bb_std
+          - macd_fast, macd_slow, macd_signal
+          - stop_loss, take_profit
+        """
+        try:
+            params = scientist_result.get('parameters', {})
+            if not params:
+                return None
+
+            # استخراج المعاملات المُكتشَفة (مع قيم افتراضية آمنة)
+            rsi_buy = float(params.get('rsi_buy', 30))
+            rsi_sell = float(params.get('rsi_sell', 70))
+            bb_std = float(params.get('bb_std', 2.0))
+            stop_loss = float(params.get('stop_loss', 0.03))
+            take_profit = float(params.get('take_profit', 0.05))
+            sharpe = scientist_result.get('sharpe_ratio', 0)
+
+            # جلب المؤشرات (نجرب أكثر من إطار زمني)
+            indicators = (
+                self._get_indicators(symbol, '1m') or
+                self._get_indicators(symbol, '5m') or
+                self._get_indicators(symbol, '1h')
+            )
+
+            if not indicators:
+                return None
+
+            # السعر الحالي
+            current_price_data = redis_manager.get_cached_price(symbol)
+            if not current_price_data:
+                return None
+            price = float(current_price_data.get('close', 0))
+            if price <= 0:
+                return None
+
             signal_type = 'HOLD'
             confidence = 0.0
             reasons = []
-            
-            # Breakout detection
-            if current_price > avg_price_20 * 1.05:  # 5% above average
-                signal_type = 'BUY'
-                confidence += 0.3
-                reasons.append(f'Price breakout: {((current_price/avg_price_20 - 1) * 100):.1f}% above average')
-            
-            # Volume spike
-            if volumes[0] > avg_volume_20 * 2:  # 2x average volume
-                if signal_type == 'BUY':
-                    confidence += 0.3
-                else:
+
+            # RSI بمعاملات الـ Scientist
+            rsi = indicators.get('rsi')
+            if rsi is not None:
+                if rsi < rsi_buy:
                     signal_type = 'BUY'
-                    confidence += 0.2
-                reasons.append(f'Volume spike: {(volumes[0]/avg_volume_20):.1f}x average')
-            
-            # Consecutive green candles
-            green_candles = 0
-            for i in range(min(5, len(prices)-1)):
-                if prices[i] > prices[i+1]:
-                    green_candles += 1
-                else:
-                    break
-            
-            if green_candles >= 3:
-                confidence += 0.2
-                reasons.append(f'{green_candles} consecutive up days')
-            
-            # Get indicators for confirmation
-            indicators = self.get_latest_indicators(symbol, timeframe)
-            if indicators:
-                if indicators['rsi'] and indicators['rsi'] > 60:
-                    confidence += 0.15
-                    reasons.append('Strong momentum (RSI > 60)')
-                
-                if indicators['adx'] and indicators['adx'] > 35:
-                    confidence += 0.15
-                    reasons.append(f'Very strong trend (ADX: {indicators["adx"]:.1f})')
-            
+                    confidence += 0.35
+                    reasons.append(f'RSI={rsi:.1f} < Scientist threshold {rsi_buy}')
+                elif rsi > rsi_sell:
+                    signal_type = 'SELL'
+                    confidence += 0.35
+                    reasons.append(f'RSI={rsi:.1f} > Scientist threshold {rsi_sell}')
+
+            # Bollinger Bands
+            bb_lower = indicators.get('bb_lower')
+            bb_upper = indicators.get('bb_upper')
+            if bb_lower and bb_upper:
+                band_width = (bb_upper - bb_lower) / bb_lower if bb_lower > 0 else 0
+                # تعديل عتبة BB بناءً على bb_std من الـ Scientist
+                adjusted_lower = bb_lower * (1 - (bb_std - 2.0) * 0.01)
+                adjusted_upper = bb_upper * (1 + (bb_std - 2.0) * 0.01)
+
+                if price <= adjusted_lower:
+                    if signal_type == 'BUY':
+                        confidence += 0.25
+                    else:
+                        signal_type = 'BUY'
+                        confidence += 0.20
+                    reasons.append(f'Price at/below Scientist-adjusted BB lower')
+                elif price >= adjusted_upper:
+                    if signal_type == 'SELL':
+                        confidence += 0.25
+                    else:
+                        signal_type = 'SELL'
+                        confidence += 0.20
+                    reasons.append(f'Price at/above Scientist-adjusted BB upper')
+
+            # MACD
+            macd = indicators.get('macd')
+            macd_sig = indicators.get('macd_signal')
+            macd_hist = indicators.get('macd_hist')
+            if macd is not None and macd_sig is not None:
+                if macd > macd_sig and (macd_hist or 0) > 0:
+                    if signal_type == 'BUY':
+                        confidence += 0.20
+                    reasons.append('MACD bullish')
+                elif macd < macd_sig and (macd_hist or 0) < 0:
+                    if signal_type == 'SELL':
+                        confidence += 0.20
+                    reasons.append('MACD bearish')
+
+            # ADX (قوة الاتجاه)
+            adx = indicators.get('adx')
+            if adx and adx > 25:
+                confidence += 0.10
+                reasons.append(f'Strong trend ADX={adx:.1f}')
+
+            # مكافأة جودة الـ Scientist (Sharpe ratio)
+            if sharpe > 1.5:
+                confidence += 0.10
+                reasons.append(f'High-quality Scientist model (Sharpe={sharpe:.2f})')
+            elif sharpe > 1.0:
+                confidence += 0.05
+
             confidence = min(confidence, 1.0)
-            
-            if signal_type == 'BUY' and confidence >= 0.75:
-                result = {
-                    'strategy': 'price_explosions',
+
+            # الحد الأدنى للثقة: 50%
+            if signal_type != 'HOLD' and confidence >= 0.50:
+                return {
+                    'strategy': f"scientist_{symbol}",
+                    'strategy_type': 'scientist_optimized',
                     'symbol': symbol,
                     'signal': signal_type,
-                    'confidence': confidence,
-                    'price': current_price,
-                    'timeframe': timeframe,
+                    'confidence': round(confidence, 4),
+                    'price': price,
+                    'timeframe': '1m',
+                    'stop_loss_pct': stop_loss,
+                    'take_profit_pct': take_profit,
+                    'scientist_sharpe': sharpe,
                     'reasons': reasons,
                     'timestamp': get_saudi_time()
                 }
-                
-                self.logger.success(f"🚀 EXPLOSION DETECTED: {symbol} - {signal_type} (confidence: {confidence:.2f})")
-                return result
-            
+
             return None
-            
+
         except Exception as e:
-            self.logger.error(f"Error analyzing price_explosions for {symbol}: {e}")
+            self.logger.error(f"Error in scientist analysis for {symbol}: {e}")
             return None
-    
-    def run(self, symbols: List[str] = None):
-        """Run strategic analysis on symbols"""
+
+    # ── التحليل العام: للأسهم التي لم يُحلّلها الـ Scientist بعد ──────────────
+
+    def _analyze_generic(self, symbol: str) -> Optional[Dict]:
+        """
+        تحليل عام للأسهم التي لم يُجرِ عليها الـ Scientist بعد.
+        يستخدم منطقاً بسيطاً لاكتشاف الفرص الواضحة فقط (ثقة عالية).
+        الهدف: توليد إشارات أولية ريثما يُكمل الـ Scientist تحليله.
+        """
         try:
-            self.logger.info("Starting Strategic Analyzer")
-            
-            # Get symbols: config watchlist → DB ohlcv → fallback
-            if symbols is None:
-                # 1. Try watchlist from config
-                watchlist = config.get('watchlist', {})
-                symbols = watchlist.get('symbols', [])
-                
-                # 2. Fallback: query from market_data.ohlcv
-                if not symbols:
-                    try:
-                        with db.get_session() as session:
-                            query = text("""
-                                SELECT DISTINCT symbol
-                                FROM market_data.ohlcv
-                                WHERE timeframe = '1m'
-                                  AND time >= NOW() - INTERVAL '1 day'
-                                  AND symbol NOT LIKE '9%'
-                                LIMIT 100
-                            """)
-                            result = session.execute(query)
-                            symbols = [row[0] for row in result.fetchall()]
-                    except Exception as db_err:
-                        self.logger.warning(f"Could not fetch symbols from DB: {db_err}")
-            
-            if not symbols:
-                self.logger.warning("No symbols to analyze — check watchlist in config.yaml")
-                return
-            
-            self.logger.info(f"Analyzing {len(symbols)} symbols: {symbols[:5]}...")
-            
+            # نجرب أكثر من إطار زمني
+            indicators = (
+                self._get_indicators(symbol, '1m') or
+                self._get_indicators(symbol, '5m')
+            )
+            if not indicators:
+                return None
+
+            current_price_data = redis_manager.get_cached_price(symbol)
+            if not current_price_data:
+                return None
+            price = float(current_price_data.get('close', 0))
+            if price <= 0:
+                return None
+
+            signal_type = 'HOLD'
+            confidence = 0.0
+            reasons = []
+
+            rsi = indicators.get('rsi')
+            macd = indicators.get('macd')
+            macd_sig = indicators.get('macd_signal')
+            macd_hist = indicators.get('macd_hist')
+            bb_lower = indicators.get('bb_lower')
+            bb_upper = indicators.get('bb_upper')
+            adx = indicators.get('adx')
+
+            # RSI متطرف جداً (عتبات صارمة لأن لا Scientist)
+            if rsi is not None:
+                if rsi < 25:
+                    signal_type = 'BUY'
+                    confidence += 0.30
+                    reasons.append(f'RSI extremely oversold ({rsi:.1f})')
+                elif rsi > 75:
+                    signal_type = 'SELL'
+                    confidence += 0.30
+                    reasons.append(f'RSI extremely overbought ({rsi:.1f})')
+
+            # MACD + BB تأكيد مزدوج
+            if macd is not None and macd_sig is not None:
+                if macd > macd_sig and (macd_hist or 0) > 0:
+                    if signal_type == 'BUY':
+                        confidence += 0.25
+                        reasons.append('MACD confirms BUY')
+                elif macd < macd_sig and (macd_hist or 0) < 0:
+                    if signal_type == 'SELL':
+                        confidence += 0.25
+                        reasons.append('MACD confirms SELL')
+
+            if bb_lower and bb_upper:
+                if price <= bb_lower and signal_type == 'BUY':
+                    confidence += 0.20
+                    reasons.append('Price at BB lower')
+                elif price >= bb_upper and signal_type == 'SELL':
+                    confidence += 0.20
+                    reasons.append('Price at BB upper')
+
+            if adx and adx > 30:
+                confidence += 0.10
+                reasons.append(f'Strong trend ADX={adx:.1f}')
+
+            confidence = min(confidence, 1.0)
+
+            # عتبة أعلى للتحليل العام (65%) لأن لا Scientist
+            if signal_type != 'HOLD' and confidence >= 0.65:
+                return {
+                    'strategy': 'generic_discovery',
+                    'strategy_type': 'pending_scientist',
+                    'symbol': symbol,
+                    'signal': signal_type,
+                    'confidence': round(confidence, 4),
+                    'price': price,
+                    'timeframe': '1m',
+                    'stop_loss_pct': 0.03,
+                    'take_profit_pct': 0.05,
+                    'scientist_sharpe': None,
+                    'reasons': reasons + ['[Pending Scientist optimization]'],
+                    'timestamp': get_saudi_time()
+                }
+
+            return None
+
+        except Exception as e:
+            self.logger.debug(f"Generic analysis failed for {symbol}: {e}")
+            return None
+
+    # ── حفظ الإشارة ───────────────────────────────────────────────────────────
+
+    def _save_signal(self, signal: Dict) -> bool:
+        """يحفظ الإشارة في DB."""
+        try:
+            with db.get_session() as session:
+                insert_signal(
+                    session,
+                    strategy_name=signal['strategy'],
+                    symbol=signal['symbol'],
+                    signal_type=signal['signal'],
+                    price=signal['price'],
+                    confidence=signal['confidence'],
+                    timeframe=signal['timeframe'],
+                    metadata={
+                        'reasons': signal.get('reasons', []),
+                        'strategy_type': signal.get('strategy_type'),
+                        'scientist_sharpe': signal.get('scientist_sharpe'),
+                        'stop_loss_pct': signal.get('stop_loss_pct'),
+                        'take_profit_pct': signal.get('take_profit_pct'),
+                    }
+                )
+            redis_manager.cache_signal(signal['strategy'], signal['symbol'], signal)
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to save signal for {signal['symbol']}: {e}")
+            return False
+
+    # ── الدالة الرئيسية ────────────────────────────────────────────────────────
+
+    def run(self, symbols: List[str] = None) -> List[Dict]:
+        """
+        يُشغّل التحليل الاستكشافي على كون الأسهم الكامل.
+
+        الخطوات:
+          1. اكتشاف الأسهم النشطة من DB (بناءً على سيولتها الذاتية)
+          2. لكل سهم: جلب أفضل استراتيجية من الـ Scientist
+          3. إذا وُجدت → تحليل بمعاملاتها المخصصة
+          4. إذا لم تُوجد → تحليل عام + إضافة لقائمة انتظار الـ Scientist
+          5. حفظ الإشارات الناجحة في DB
+        """
+        try:
+            self.logger.info("🚀 Strategic Analyzer starting (exploratory mode)")
+
+            # ── 1. اكتشاف الأسهم النشطة ──────────────────────────────────────
+            if symbols:
+                active_symbols = symbols
+                self.logger.info(f"Using provided symbols: {len(active_symbols)}")
+            else:
+                active_symbols, classifications = symbol_universe.get_active_universe(
+                    timeframe='1m',
+                    use_cache=True,
+                    include_awakening=True
+                )
+
+            if not active_symbols:
+                self.logger.warning(
+                    "⚠️ No active symbols found. "
+                    "Either DB is empty or all symbols are DORMANT. "
+                    "Waiting for market data..."
+                )
+                return []
+
+            self.logger.info(
+                f"📊 Active universe: {len(active_symbols)} symbols to analyze"
+            )
+
+            # ── 2. تحليل كل سهم ──────────────────────────────────────────────
             all_signals = []
-            
-            for symbol in symbols:
-                # Analyze with all strategies
-                signals = [
-                    self.analyze_aggressive_daily(symbol),
-                    self.analyze_short_waves(symbol),
-                    self.analyze_medium_waves(symbol),
-                    self.analyze_price_explosions(symbol)
-                ]
-                
-                # Save valid signals
-                for signal in signals:
+            scientist_optimized = 0
+            pending_scientist = 0
+            needs_scientist_queue = []
+
+            max_signals = self.bot_config.get('max_signals_per_run', 100)
+
+            for symbol in active_symbols:
+                if len(all_signals) >= max_signals:
+                    break
+
+                # جلب أفضل استراتيجية من الـ Scientist
+                best_strategy = symbol_universe.get_best_strategy_for_symbol(symbol)
+
+                if best_strategy:
+                    # ── تحليل بمعاملات الـ Scientist ──────────────────────
+                    signal = self._analyze_with_scientist_params(symbol, best_strategy)
                     if signal:
                         all_signals.append(signal)
-                        
-                        # Save to database
-                        try:
-                            with db.get_session() as session:
-                                insert_signal(
-                                    session,
-                                    strategy_name=signal['strategy'],
-                                    symbol=signal['symbol'],
-                                    signal_type=signal['signal'],
-                                    price=signal['price'],
-                                    confidence=signal['confidence'],
-                                    timeframe=signal['timeframe'],
-                                    metadata={'reasons': signal['reasons']}
-                                )
-                            self.logger.success(
-                                f"✅ Signal saved: {signal['symbol']} "
-                                f"{signal['signal']} [{signal['strategy']}] "
-                                f"conf={signal['confidence']:.2f}"
-                            )
-                        except Exception as save_err:
-                            self.logger.error(f"Failed to save signal: {save_err}")
-                        
-                        # Cache signal
-                        redis_manager.cache_signal(signal['strategy'], symbol, signal)
-            
-            self.logger.success(f"Strategic Analyzer completed: {len(all_signals)} signals generated")
+                        scientist_optimized += 1
+                        self.logger.success(
+                            f"✅ [{signal['signal']}] {symbol} "
+                            f"[scientist_optimized | Sharpe={best_strategy['sharpe_ratio']:.2f}] "
+                            f"conf={signal['confidence']:.2f}"
+                        )
+                else:
+                    # ── لا Scientist بعد → تحليل عام + أضف لقائمة الانتظار ──
+                    needs_scientist_queue.append(symbol)
+                    signal = self._analyze_generic(symbol)
+                    if signal:
+                        all_signals.append(signal)
+                        pending_scientist += 1
+                        self.logger.info(
+                            f"📌 [{signal['signal']}] {symbol} "
+                            f"[pending_scientist] conf={signal['confidence']:.2f}"
+                        )
+
+            # ── 3. حفظ الإشارات ──────────────────────────────────────────────
+            saved = 0
+            for signal in all_signals:
+                if self._save_signal(signal):
+                    saved += 1
+
+            # ── 4. تسجيل الأسهم التي تحتاج Scientist في Redis ───────────────
+            if needs_scientist_queue:
+                redis_manager.set(
+                    "scientist:pending_symbols",
+                    needs_scientist_queue[:50],  # أولوية أول 50
+                    ttl=3600
+                )
+                self.logger.info(
+                    f"🔬 Queued {len(needs_scientist_queue)} symbols for Scientist analysis"
+                )
+
+            # ── 5. ملخص ──────────────────────────────────────────────────────
+            self.logger.success(
+                f"✅ Strategic Analyzer complete: "
+                f"{len(all_signals)} signals generated "
+                f"({scientist_optimized} scientist-optimized, {pending_scientist} pending) | "
+                f"{saved} saved to DB"
+            )
+
             return all_signals
-            
+
         except Exception as e:
             self.logger.error(f"Error in Strategic Analyzer: {e}")
             raise
 
 
 if __name__ == "__main__":
-    # Test the bot
     bot = StrategicAnalyzer()
-    bot.run(symbols=['2222'])
-
-    def get_news_sentiment(self, symbol: str) -> float:
-        """
-        Get news sentiment score for a symbol from FinBERT analysis
-        
-        Returns:
-            float: Sentiment score from -1.0 (very negative) to +1.0 (very positive)
-        """
-        try:
-            # Check cache first
-            cached_sentiment = redis_manager.get(f"sentiment:{symbol}")
-            
-            if cached_sentiment is not None:
-                return cached_sentiment
-            
-            # Get from database (latest sentiment from Scientist bot)
-            with db.get_session() as session:
-                query = text("""
-                SELECT sentiment_score
-                FROM market_data.news_sentiment
-                WHERE symbol = :symbol
-                ORDER BY timestamp DESC
-                LIMIT 1
-                """)
-                result = session.execute(query, {'symbol': symbol})
-                row = result.fetchone()
-            
-            if row:
-                sentiment_score = row[0]
-                # Cache for 1 hour
-                redis_manager.set(f"sentiment:{symbol}", sentiment_score, ttl=3600)
-                return sentiment_score
-            
-            # No sentiment data available - return neutral
-            return 0.0
-            
-        except Exception as e:
-            self.logger.error(f"Error getting news sentiment for {symbol}: {e}")
-            return 0.0
-    
-    def apply_sentiment_weight(self, signal: Dict, sentiment_score: float) -> Dict:
-        """
-        Apply news sentiment weight to signal confidence
-        
-        If sentiment score is negative (-0.6 or lower), reduce confidence by 40%
-        
-        Args:
-            signal: Original signal dict
-            sentiment_score: Sentiment score from FinBERT (-1.0 to +1.0)
-            
-        Returns:
-            Modified signal with adjusted confidence
-        """
-        try:
-            original_confidence = signal.get('confidence', 1.0)
-            
-            # Apply penalty for negative sentiment
-            if sentiment_score <= -0.6:
-                # Reduce confidence by 40%
-                confidence_multiplier = 0.6
-                adjusted_confidence = original_confidence * confidence_multiplier
-                
-                signal['confidence'] = adjusted_confidence
-                signal['sentiment_adjusted'] = True
-                signal['sentiment_score'] = sentiment_score
-                signal['sentiment_penalty'] = 0.4
-                
-                self.logger.info(
-                    f"{signal['symbol']}: Negative sentiment detected ({sentiment_score:.2f}) - "
-                    f"Confidence reduced from {original_confidence:.2f} to {adjusted_confidence:.2f}"
-                )
-            else:
-                # No adjustment needed
-                signal['sentiment_adjusted'] = False
-                signal['sentiment_score'] = sentiment_score
-                signal['sentiment_penalty'] = 0.0
-            
-            return signal
-            
-        except Exception as e:
-            self.logger.error(f"Error applying sentiment weight: {e}")
-            return signal
-    
-    def generate_signal_with_sentiment(self, symbol: str, strategy: str, 
-                                      signal_type: str, confidence: float, 
-                                      indicators: Dict) -> Dict:
-        """
-        Generate signal with sentiment adjustment
-        
-        Args:
-            symbol: Stock symbol
-            strategy: Strategy name
-            signal_type: BUY or SELL
-            confidence: Base confidence (0.0 to 1.0)
-            indicators: Technical indicators dict
-            
-        Returns:
-            Signal dict with sentiment adjustment applied
-        """
-        try:
-            # Create base signal
-            signal = {
-                'symbol': symbol,
-                'strategy': strategy,
-                'type': signal_type,
-                'confidence': confidence,
-                'indicators': indicators,
-                'timestamp': get_saudi_time()
-            }
-            
-            # Get news sentiment
-            sentiment_score = self.get_news_sentiment(symbol)
-            
-            # Apply sentiment weight
-            signal = self.apply_sentiment_weight(signal, sentiment_score)
-            
-            return signal
-            
-        except Exception as e:
-            self.logger.error(f"Error generating signal with sentiment: {e}")
-            return signal
+    signals = bot.run()
+    print(f"\nGenerated {len(signals)} signals")
+    for s in signals[:5]:
+        print(f"  {s['symbol']}: {s['signal']} [{s['strategy']}] conf={s['confidence']:.2f}")

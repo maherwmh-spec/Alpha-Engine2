@@ -1,6 +1,11 @@
 # Alpha-Engine2 Configuration
+# ═══════════════════════════════════════════════════════════════
+# المبدأ الأساسي: لا قوائم ثابتة — كل شيء ديناميكي
+# الأسهم تُكتشف من DB بناءً على سيولتها التاريخية الخاصة
+# الاستراتيجيات تُحدَّد من نتائج الـ Scientist لكل سهم
+# ═══════════════════════════════════════════════════════════════
 
-# ── Sahmk API ──────────────────────────────────────────────
+# ── Sahmk API ──────────────────────────────────────────────────
 sahmk:
   api_key: "shmk_live_447cbe87839b5e9d48d663625386bb4b01bcd4ff3f68a1e8"
   base_url: "https://app.sahmk.sa/api/v1"
@@ -10,13 +15,13 @@ sahmk:
   max_retries: 5
   rate_limit_per_minute: 60
 
-# ── Telegram ───────────────────────────────────────────────
+# ── Telegram ───────────────────────────────────────────────────
 telegram:
   bot_token: "8531313103:AAGif8EfDMoC_tk5bVukuZnRhxUgrgLF34I"
   chat_id: "145514375"
   enabled: true
 
-# ── Database (TimescaleDB / PostgreSQL) ────────────────────
+# ── Database (TimescaleDB / PostgreSQL) ────────────────────────
 database:
   host: "postgres"
   port: 5432
@@ -26,90 +31,91 @@ database:
   pool_size: 10
   max_overflow: 20
 
-# ── Redis ──────────────────────────────────────────────────
+# ── Redis ──────────────────────────────────────────────────────
 redis:
   host: "redis"
   port: 6379
   db: 0
   password: "alpha_redis_password_2024"
 
-# ── Market Settings ────────────────────────────────────────
+# ── Market Settings ────────────────────────────────────────────
 market:
   timezone: "Asia/Riyadh"
   open_time: "10:00"
   close_time: "15:00"
-  trading_days: [0, 1, 2, 3, 4]
+  trading_days: [0, 1, 2, 3, 4]   # الأحد=0 ... الخميس=4
 
-# ── Filters ────────────────────────────────────────────────
+# ── Symbol Universe (اكتشاف الأسهم ديناميكياً) ────────────────
+# لا توجد قائمة ثابتة — الأسهم تُكتشف من DB
+symbol_universe:
+  # مقارنة السيولة بالسيولة التاريخية للسهم نفسه (ليس بالسوق)
+  activity_thresholds:
+    active: 1.0       # الحجم الحالي >= 100% من متوسطه التاريخي
+    awakening: 0.5    # الحجم الحالي >= 50% من متوسطه التاريخي
+    # أقل من 50% → DORMANT (يُتجاهل)
+
+  # نافذة حساب المتوسط التاريخي الخاص بالسهم
+  historical_window_days: 30
+
+  # الحد الأدنى لعدد الشموع التاريخية قبل تصنيف السهم
+  min_historical_candles: 30
+
+  # تحديث الكون كل N دقيقة
+  cache_ttl_minutes: 5
+
+# ── Scientist (الاستكشاف والتحسين) ────────────────────────────
+scientist:
+  # الإطار الزمني الافتراضي للاختبار الخلفي
+  default_timeframe: "1m"
+
+  # عدد الأجيال في الخوارزمية الجينية
+  generations: 50
+
+  # حجم المجتمع في كل جيل
+  population_size: 100
+
+  # الحد الأدنى المقبول لـ Sharpe Ratio
+  min_sharpe_ratio: 0.5
+
+  # إعادة تحليل السهم إذا مضى أكثر من N يوم على آخر تحليل
+  reanalysis_interval_days: 7
+
+  # عدد الأسهم التي يُحلّلها الـ Scientist في كل دورة
+  symbols_per_run: 5
+
+# ── Strategic Analyzer (التحليل الاستكشافي) ──────────────────
+strategic_analyzer:
+  # الحد الأدنى للثقة لإشارات الـ Scientist
+  min_confidence_scientist: 0.50
+
+  # الحد الأدنى للثقة للإشارات العامة (قبل الـ Scientist)
+  min_confidence_generic: 0.65
+
+  # الحد الأقصى للإشارات في كل دورة تشغيل
+  max_signals_per_run: 100
+
+# ── Filters (فلاتر الجودة) ─────────────────────────────────────
 filters:
-  liquidity:
-    min_avg_volume: 100000
-    lookback_days: 20
-  volatility:
-    max_gap_pct: 10.0
-    min_price: 2.0
-    max_price: 500.0
+  # الحد الأدنى لعدد الشموع قبل التحليل
+  min_candles: 30
 
-# ── Logging ────────────────────────────────────────────────
+  # نطاق السعر المقبول
+  price:
+    min: 1.0
+    max: 1000.0
+
+# ── Logging ────────────────────────────────────────────────────
 logging:
   level: "INFO"
   rotation: "1 day"
   retention: "30 days"
 
-# ── Watchlist (الأسهم المُراقَبة) ─────────────────────────────
-watchlist:
-  symbols:
-    - "2222"   # أرامكو السعودية
-    - "1120"   # الراجحي
-    - "2010"   # سابك
-    - "2350"   # المتقدمة
-    - "4200"   # بنك الجزيرة
-    - "1180"   # الأهلي
-    - "2380"   # بترو رابغ
-    - "3020"   # سمكو
-    - "1010"   # الرياض
-    - "4030"   # سدافكو
-
-# ── Strategies (الاستراتيجيات) ────────────────────────────────
-strategies:
-  aggressive_daily:
-    enabled: true
-    timeframe: "1m"
-    target_pct: 1.5
-    stop_loss_pct: 0.8
-    min_confidence: 0.50
-    description: "صفقات يومية سريعة 1-3%"
-
-  short_waves:
-    enabled: true
-    timeframe: "5m"
-    target_pct: 5.0
-    stop_loss_pct: 2.0
-    min_confidence: 0.55
-    description: "موجات قصيرة 1-7 أيام"
-
-  medium_waves:
-    enabled: true
-    timeframe: "15m"
-    target_pct: 10.0
-    stop_loss_pct: 3.0
-    min_confidence: 0.60
-    description: "موجات متوسطة 1-2 أسبوع"
-
-  price_explosions:
-    enabled: true
-    timeframe: "1m"
-    target_pct: 15.0
-    stop_loss_pct: 4.0
-    min_confidence: 0.75
-    description: "انفجارات سعرية نادرة 15%+"
-
 # ── Bots configuration ────────────────────────────────────────
 bots:
   strategic_analyzer:
     enabled: true
-    run_interval: 600
-    max_signals_per_run: 50
+    run_interval: 600       # كل 10 دقائق
+    max_signals_per_run: 100
 
   technical_miner:
     enabled: true
@@ -138,7 +144,7 @@ bots:
 
   scientist:
     enabled: true
-    run_interval: 3600
+    run_interval: 3600      # كل ساعة — يُحلّل 5 أسهم جديدة
 
   health_monitor:
     enabled: true
@@ -148,7 +154,8 @@ bots:
     enabled: true
 
   self_trainer:
-    enabled: false
+    enabled: true
+    run_interval: 86400     # يومياً — يراجع أداء الإشارات
 
   weekly_reviewer:
     enabled: true
