@@ -476,16 +476,44 @@ class TechnicalMiner:
             self.logger.error(f"[TechnicalMiner] Error fetching data for {symbol} @ {timeframe}: {e}")
             return None
     
+    def _get_symbols_from_db(self) -> List[str]:
+        """
+        جلب كل الأسهم التي لها بيانات في DB (آخر 7 أيام).
+        هذا يضمن التحليل الشامل لكل سهم جمع بياناته بدون قائمة ثابتة.
+        """
+        try:
+            with db.get_session() as session:
+                result = session.execute(text("""
+                    SELECT DISTINCT symbol
+                    FROM market_data.ohlcv
+                    WHERE time >= NOW() - INTERVAL '7 days'
+                      AND symbol NOT LIKE '900%'
+                    ORDER BY symbol
+                """))
+                symbols = [row[0] for row in result.fetchall()]
+            self.logger.info(f"[TechnicalMiner] Found {len(symbols)} symbols in DB")
+            return symbols
+        except Exception as e:
+            self.logger.error(f"[TechnicalMiner] Error fetching symbols from DB: {e}")
+            return []
+
     def run(self, symbols: List[str] = None):
         """
         Main execution method
         """
         try:
             if symbols is None:
-                symbols = config.get('symbols', [])
-            
+                symbols = self._get_symbols_from_db()
+
+            if not symbols:
+                self.logger.warning(
+                    "[TechnicalMiner] No symbols found in DB. "
+                    "Waiting for market_reporter to collect data first."
+                )
+                return
+
             self.logger.info(f"Starting Technical Miner for {len(symbols)} symbols")
-            
+
             for symbol in symbols:
                 try:
                     # Analyze across multiple timeframes

@@ -620,32 +620,12 @@ class MarketReporter:
     async def _sector_polling_loop(self):
         """
         حلقة تعمل كل دقيقة لحساب بيانات القطاعات والمؤشر العام.
-
-        استراتيجية المصدر (بالأولوية):
-          1. أساسي: حساب VWAP من بيانات الأسهم في DB (sector_calculator)
-             → يعمل دائماً بدون اتصال خارجي
-          2. احتياطي: Saudi Exchange scraper (إذا كان DB فارغاً)
-             → قد يفشل بسبب Cloudflare من IP الخادم
-
-        يعمل فقط خلال ساعات التداول (09:55 - 15:05، الأحد-الخميس).
+        يحسب VWAP من بيانات الأسهم الموجودة في DB (آخر 10 دقائق).
+        يعمل دائماً — خلال التداول وخارجه — طالما توجد بيانات في DB.
         """
-        self.logger.info("📊 Sector polling loop started (DB calculator + Saudi Exchange fallback)")
+        self.logger.info("📊 Sector polling loop started (DB VWAP calculator — always on)")
         while True:
             await asyncio.sleep(60)  # انتظر دقيقة
-
-            # ── فحص وقت التداول ──────────────────────────────────────────────
-            now = get_saudi_time()
-            if now.weekday() in [4, 5]:  # الجمعة = 4، السبت = 5
-                self.logger.debug("⏭️  Sector polling: market closed (weekend)")
-                continue
-            market_start = now.replace(hour=9,  minute=55, second=0, microsecond=0)
-            market_end   = now.replace(hour=15, minute=5,  second=0, microsecond=0)
-            if not (market_start <= now <= market_end):
-                self.logger.debug(
-                    f"⏭️  Sector polling: outside trading hours "
-                    f"({now.strftime('%H:%M')} not in 09:55-15:05)"
-                )
-                continue
 
             all_candles: Dict = {}
 

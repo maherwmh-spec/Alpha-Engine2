@@ -142,11 +142,12 @@ class StrategicAnalyzer:
             if not indicators:
                 return None
 
-            # السعر الحالي
+            # السعر الحالي: من Redis أولاً، ثم من DB كـ fallback
             current_price_data = redis_manager.get_cached_price(symbol)
-            if not current_price_data:
-                return None
-            price = float(current_price_data.get('close', 0))
+            if current_price_data:
+                price = float(current_price_data.get('close', 0))
+            else:
+                price = self._get_last_price_from_db(symbol) or 0.0
             if price <= 0:
                 return None
 
@@ -242,7 +243,24 @@ class StrategicAnalyzer:
             self.logger.error(f"Error in scientist analysis for {symbol}: {e}")
             return None
 
-    # ── التحليل العام: للأسهم التي لم يُحلّلها الـ Scientist بعد ──────────────
+    def _get_last_price_from_db(self, symbol: str) -> Optional[float]:
+        """Fallback: جلب آخر سعر من DB إذا لم يكن في Redis."""
+        try:
+            with db.get_session() as session:
+                result = session.execute(
+                    text("""
+                        SELECT close FROM market_data.ohlcv
+                        WHERE symbol = :symbol
+                        ORDER BY time DESC LIMIT 1
+                    """),
+                    {'symbol': symbol}
+                )
+                row = result.fetchone()
+            return float(row[0]) if row and row[0] else None
+        except Exception:
+            return None
+
+    # ── التحليل العام: للأسهم التي لم يُحلّلها الـ Scientist بعد ────────────
 
     def _analyze_generic(self, symbol: str) -> Optional[Dict]:
         """
@@ -259,10 +277,13 @@ class StrategicAnalyzer:
             if not indicators:
                 return None
 
+            # جلب السعر: من Redis أولاً، ثم من DB كـ fallback
             current_price_data = redis_manager.get_cached_price(symbol)
-            if not current_price_data:
-                return None
-            price = float(current_price_data.get('close', 0))
+            if current_price_data:
+                price = float(current_price_data.get('close', 0))
+            else:
+                price = self._get_last_price_from_db(symbol) or 0.0
+
             if price <= 0:
                 return None
 
