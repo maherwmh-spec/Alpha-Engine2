@@ -6,10 +6,10 @@ Symbol Universe — اكتشاف أسهم السوق الكامل وتصنيفه
   السيولة المقارِنة ليست "هل هو سائل مقارنةً بالسوق؟"
   بل "هل هو سائل مقارنةً بنفسه في الفترات الماضية؟"
 
-المخرجات:
-  - قائمة ديناميكية بكل الأسهم النشطة في DB مع درجة نشاطها الحالي
-  - تصنيف كل سهم: ACTIVE / AWAKENING / DORMANT
-  - يُحدَّث كل دورة تشغيل (لا يُخزَّن كقائمة ثابتة)
+الإصلاح الجذري (v3):
+  - استبدال حساب النافذة الزمنية اليدوي بـ SQL مباشر
+  - SQL يجد آخر يوم فيه بيانات فعلية لكل سهم
+  - لا اعتماد على timezone calculations المعقدة
 """
 
 from typing import List, Dict, Optional, Tuple
@@ -25,27 +25,14 @@ from scripts.redis_manager import redis_manager
 
 # ── ثوابت التصنيف ──────────────────────────────────────────────────────────────
 
-# نسبة الحجم الحالي إلى المتوسط التاريخي الخاص بالسهم
 ACTIVITY_THRESHOLDS = {
     'ACTIVE':    1.0,   # الحجم الحالي >= 100% من متوسطه التاريخي
     'AWAKENING': 0.5,   # الحجم الحالي >= 50% من متوسطه التاريخي
-    # أقل من 50% → DORMANT (خامل)
 }
 
-# الحد الأدنى لعدد الشموع التاريخية المطلوبة لتقييم السهم
 MIN_HISTORICAL_CANDLES = 30
-
-# نافذة حساب المتوسط التاريخي (عدد الأيام)
 HISTORICAL_WINDOW_DAYS = 30
 
-# نافذة الحجم الحالي (عدد الدقائق الأخيرة) — تُستخدم فقط أثناء التداول
-CURRENT_WINDOW_MINUTES = 60
-
-# ساعات التداول (KSA = UTC+3)
-MARKET_OPEN_HOUR_KSA  = 10   # 10:00 KSA
-MARKET_CLOSE_HOUR_KSA = 15   # 15:00 KSA
-
-# مفتاح Redis للكاش
 UNIVERSE_CACHE_KEY = "symbol_universe:active"
 UNIVERSE_CACHE_TTL = 300  # 5 دقائق
 
@@ -55,7 +42,8 @@ class SymbolUniverse:
     يكتشف كل أسهم السوق من قاعدة البيانات ويصنّفها
     بناءً على سيولتها التاريخية الخاصة بها.
 
-    لا توجد قائمة ثابتة — كل شيء ديناميكي.
+    الإصلاح الجذري: كل الحسابات تتم في SQL مباشرة على DB
+    بدلاً من حساب النوافذ الزمنية في Python (كان مصدر الخطأ).
     """
 
     def __init__(self):
@@ -64,247 +52,154 @@ class SymbolUniverse:
     # ── الاكتشاف الكامل ────────────────────────────────────────────────────────
 
     def discover_all_symbols(self) -> List[str]:
-        """
-        يجلب كل الرموز الموجودة في market_data.ohlcv
-        (باستثناء رموز القطاعات 9xxxx).
-        """
+        """يجلب كل الرموز الموجودة في market_data.ohlcv (باستثناء القطاعات 9xxxx)."""
         try:
             with db.get_session() as session:
-                query = text("""
+                result = session.execute(text("""
                     SELECT DISTINCT symbol
                     FROM market_data.ohlcv
                     WHERE symbol NOT LIKE '9%'
                     ORDER BY symbol
-                """)
-                result = session.execute(query)
+                """))
                 symbols = [row[0] for row in result.fetchall()]
-
             self.logger.info(f"📊 Discovered {len(symbols)} symbols in DB")
             return symbols
-
         except Exception as e:
             self.logger.error(f"Error discovering symbols: {e}")
             return []
 
-    # ── حساب السيولة التاريخية الخاصة بكل سهم ─────────────────────────────────
-
-    def _is_market_open(self) -> bool:
-        """هل السوق مفتوحة الآن؟"""
-        from datetime import timezone
-        now_ksa = datetime.now(timezone.utc) + timedelta(hours=3)
-        # الأحد=6, الاثنين=0, ... الخميس=4, الجمعة=5, السبت=6
-        weekday = now_ksa.weekday()  # Monday=0 ... Sunday=6
-        # تداول: الأحد(6) - الخميس(3)
-        is_trading_day = weekday in (6, 0, 1, 2, 3)
-        is_trading_hour = MARKET_OPEN_HOUR_KSA <= now_ksa.hour < MARKET_CLOSE_HOUR_KSA
-        return is_trading_day and is_trading_hour
-
-    def _get_last_session_window(self) -> Tuple[datetime, datetime]:
-        """
-        يُعيد نافذة زمنية تمثّل آخر جلسة تداول مكتملة أو الجلسة الحالية.
-
-        أثناء التداول: آخر 60 دقيقة من الآن.
-        خارج التداول: آخر يوم تداول كامل (من 10:00 إلى 15:00 KSA).
-        """
-        from datetime import timezone
-        now_ksa = datetime.now(timezone.utc) + timedelta(hours=3)
-        now_utc = datetime.now(timezone.utc)
-
-        if self._is_market_open():
-            # أثناء التداول: آخر 60 دقيقة
-            return now_utc - timedelta(minutes=60), now_utc
-
-        # خارج التداول: نبحث عن آخر يوم تداول
-        # نرجع للخلف حتى نجد يوم تداول
-        candidate = now_ksa.date()
-        for _ in range(7):
-            wd = candidate.weekday()
-            if wd in (6, 0, 1, 2, 3):  # أحد-خميس
-                break
-            candidate -= timedelta(days=1)
-
-        # نافذة آخر جلسة: من 10:00 إلى 15:00 KSA بتوقيت UTC
-        from datetime import timezone as tz
-        session_start_ksa = datetime(
-            candidate.year, candidate.month, candidate.day,
-            MARKET_OPEN_HOUR_KSA, 0, 0, tzinfo=tz.utc
-        ) - timedelta(hours=3)  # KSA → UTC
-        session_end_ksa = datetime(
-            candidate.year, candidate.month, candidate.day,
-            MARKET_CLOSE_HOUR_KSA, 0, 0, tzinfo=tz.utc
-        ) - timedelta(hours=3)
-
-        return session_start_ksa, session_end_ksa
-
-    def _get_historical_avg_volume(
-        self, symbol: str, timeframe: str = '1m', days: int = HISTORICAL_WINDOW_DAYS
-    ) -> Optional[float]:
-        """
-        يحسب متوسط الحجم اليومي التاريخي الخاص بالسهم
-        خلال الـ N يوماً الماضية.
-
-        هذا هو المرجع الذاتي — لا مقارنة بالسوق.
-        """
-        try:
-            with db.get_session() as session:
-                query = text("""
-                    SELECT
-                        DATE_TRUNC('day', time) AS day,
-                        SUM(volume) AS daily_volume
-                    FROM market_data.ohlcv
-                    WHERE symbol = :symbol
-                      AND timeframe = :timeframe
-                      AND time >= NOW() - (:days * INTERVAL '1 day')
-                    GROUP BY DATE_TRUNC('day', time)
-                    HAVING SUM(volume) > 0
-                    ORDER BY day DESC
-                """)
-                result = session.execute(query, {
-                    'symbol': symbol,
-                    'timeframe': timeframe,
-                    'days': days
-                })
-                rows = result.fetchall()
-
-            if not rows or len(rows) < 2:
-                return None
-
-            daily_volumes = [float(row[1]) for row in rows]
-            avg = float(np.mean(daily_volumes))
-            return avg if avg > 0 else None
-
-        except Exception as e:
-            self.logger.debug(f"Error getting historical volume for {symbol}: {e}")
-            return None
-
-    def _get_current_volume(
-        self, symbol: str, timeframe: str = '1m'
-    ) -> Optional[float]:
-        """
-        يحسب إجمالي الحجم في نافذة آخر جلسة تداول.
-
-        أثناء التداول: آخر 60 دقيقة.
-        خارج التداول: آخر جلسة تداول مكتملة (10:00-15:00 KSA).
-        """
-        try:
-            window_start, window_end = self._get_last_session_window()
-
-            with db.get_session() as session:
-                query = text("""
-                    SELECT COALESCE(SUM(volume), 0)
-                    FROM market_data.ohlcv
-                    WHERE symbol = :symbol
-                      AND timeframe = :timeframe
-                      AND time >= :window_start
-                      AND time <= :window_end
-                """)
-                result = session.execute(query, {
-                    'symbol': symbol,
-                    'timeframe': timeframe,
-                    'window_start': window_start,
-                    'window_end': window_end
-                })
-                row = result.fetchone()
-
-            return float(row[0]) if row and row[0] else 0.0
-
-        except Exception as e:
-            self.logger.debug(f"Error getting current volume for {symbol}: {e}")
-            return 0.0
-
-    def _get_candle_count(self, symbol: str, timeframe: str = '1m') -> int:
-        """يحسب عدد الشموع المتاحة للسهم."""
-        try:
-            with db.get_session() as session:
-                query = text("""
-                    SELECT COUNT(*)
-                    FROM market_data.ohlcv
-                    WHERE symbol = :symbol AND timeframe = :timeframe
-                """)
-                result = session.execute(query, {'symbol': symbol, 'timeframe': timeframe})
-                row = result.fetchone()
-            return int(row[0]) if row else 0
-        except Exception:
-            return 0
-
-    # ── التصنيف الرئيسي ────────────────────────────────────────────────────────
+    # ── التصنيف الرئيسي (SQL-based) ───────────────────────────────────────────
 
     def classify_symbol(self, symbol: str, timeframe: str = '1m') -> Dict:
         """
         يُصنّف سهماً واحداً بناءً على سيولته التاريخية الخاصة.
 
-        المخرجات:
-            {
-                'symbol': '2222',
-                'status': 'ACTIVE',           # ACTIVE / AWAKENING / DORMANT
-                'volume_ratio': 1.35,         # الحجم الحالي / المتوسط التاريخي
-                'current_volume': 1500000,
-                'historical_avg_volume': 1111111,
-                'candle_count': 18798,
-                'eligible': True              # هل يُحلَّل هذا السهم؟
-            }
+        الإصلاح: كل الحسابات في SQL — لا Python timezone magic.
+
+        المنطق:
+          1. احسب متوسط الحجم اليومي لآخر 30 يوم (باستثناء آخر يومين)
+          2. احسب حجم آخر يوم تداول فيه بيانات فعلية
+          3. volume_ratio = آخر يوم / المتوسط التاريخي
         """
-        candle_count = self._get_candle_count(symbol, timeframe)
+        try:
+            with db.get_session() as session:
+                # ── الاستعلام الموحّد: كل الحسابات في SQL واحد ──
+                result = session.execute(text("""
+                    WITH daily_volumes AS (
+                        SELECT
+                            DATE_TRUNC('day', time) AS trading_day,
+                            SUM(volume)             AS daily_vol,
+                            COUNT(*)                AS candle_count
+                        FROM market_data.ohlcv
+                        WHERE symbol    = :symbol
+                          AND timeframe = :timeframe
+                          AND volume    > 0
+                        GROUP BY DATE_TRUNC('day', time)
+                        ORDER BY trading_day DESC
+                    ),
+                    ranked AS (
+                        SELECT
+                            trading_day,
+                            daily_vol,
+                            candle_count,
+                            ROW_NUMBER() OVER (ORDER BY trading_day DESC) AS rn
+                        FROM daily_volumes
+                    ),
+                    -- آخر يوم فيه بيانات (rn=1)
+                    last_day AS (
+                        SELECT daily_vol AS last_vol, candle_count AS last_candles
+                        FROM ranked WHERE rn = 1
+                    ),
+                    -- متوسط الأيام من rn=2 إلى rn=31 (30 يوم تاريخي)
+                    history AS (
+                        SELECT
+                            AVG(daily_vol)  AS hist_avg,
+                            COUNT(*)        AS hist_days,
+                            SUM(candle_count) AS total_candles
+                        FROM ranked
+                        WHERE rn BETWEEN 2 AND 31
+                    )
+                    SELECT
+                        COALESCE(last_day.last_vol, 0)      AS last_vol,
+                        COALESCE(last_day.last_candles, 0)  AS last_candles,
+                        COALESCE(history.hist_avg, 0)       AS hist_avg,
+                        COALESCE(history.hist_days, 0)      AS hist_days,
+                        COALESCE(history.total_candles, 0)  AS total_candles
+                    FROM history
+                    FULL OUTER JOIN last_day ON TRUE
+                """), {'symbol': symbol, 'timeframe': timeframe})
+                row = result.fetchone()
 
-        if candle_count < MIN_HISTORICAL_CANDLES:
+            if not row:
+                return self._dormant(symbol, 0, 'no_data')
+
+            last_vol      = float(row[0] or 0)
+            last_candles  = int(row[1] or 0)
+            hist_avg      = float(row[2] or 0)
+            hist_days     = int(row[3] or 0)
+            total_candles = int(row[4] or 0)
+
+            # أيضاً احسب إجمالي الشموع لهذا السهم (لفحص MIN_HISTORICAL_CANDLES)
+            with db.get_session() as session:
+                cnt_result = session.execute(text("""
+                    SELECT COUNT(*) FROM market_data.ohlcv
+                    WHERE symbol = :symbol AND timeframe = :timeframe
+                """), {'symbol': symbol, 'timeframe': timeframe})
+                total_row = cnt_result.fetchone()
+            all_candles = int(total_row[0]) if total_row else 0
+
+            if all_candles < MIN_HISTORICAL_CANDLES:
+                return self._dormant(symbol, all_candles, f'insufficient_data ({all_candles} candles)')
+
+            if hist_avg <= 0:
+                # لا يوجد تاريخ كافٍ — لكن إذا كان آخر يوم فيه بيانات، صنّفه AWAKENING
+                if last_vol > 0:
+                    return {
+                        'symbol': symbol,
+                        'status': 'AWAKENING',
+                        'volume_ratio': 0.5,  # نسبة افتراضية
+                        'current_volume': last_vol,
+                        'historical_avg_volume': 0.0,
+                        'candle_count': all_candles,
+                        'eligible': True,
+                        'reason': 'new_symbol_with_data'
+                    }
+                return self._dormant(symbol, all_candles, 'no_historical_volume')
+
+            volume_ratio = last_vol / hist_avg if hist_avg > 0 else 0.0
+
+            if volume_ratio >= ACTIVITY_THRESHOLDS['ACTIVE']:
+                status, eligible = 'ACTIVE', True
+            elif volume_ratio >= ACTIVITY_THRESHOLDS['AWAKENING']:
+                status, eligible = 'AWAKENING', True
+            else:
+                status, eligible = 'DORMANT', False
+
             return {
                 'symbol': symbol,
-                'status': 'DORMANT',
-                'volume_ratio': 0.0,
-                'current_volume': 0.0,
-                'historical_avg_volume': 0.0,
-                'candle_count': candle_count,
-                'eligible': False,
-                'reason': f'insufficient_data ({candle_count} candles)'
+                'status': status,
+                'volume_ratio': round(volume_ratio, 3),
+                'current_volume': last_vol,
+                'historical_avg_volume': hist_avg,
+                'candle_count': all_candles,
+                'eligible': eligible,
+                'reason': f'volume_ratio={volume_ratio:.2f} (last={last_vol:.0f} / hist_avg={hist_avg:.0f})'
             }
 
-        hist_avg = self._get_historical_avg_volume(symbol, timeframe)
-        current_vol = self._get_current_volume(symbol, timeframe)
+        except Exception as e:
+            self.logger.error(f"Error classifying {symbol}: {e}")
+            return self._dormant(symbol, 0, f'error: {e}')
 
-        if not hist_avg or hist_avg == 0:
-            return {
-                'symbol': symbol,
-                'status': 'DORMANT',
-                'volume_ratio': 0.0,
-                'current_volume': current_vol,
-                'historical_avg_volume': 0.0,
-                'candle_count': candle_count,
-                'eligible': False,
-                'reason': 'no_historical_volume'
-            }
-
-        # المقارنة الذاتية:
-        # - أثناء التداول: حجم آخر 60 دقيقة vs متوسط ساعة تداول تاريخي (يومي ÷ 5)
-        # - خارج التداول: حجم آخر جلسة كاملة vs متوسط يوم تداول تاريخي
-        if self._is_market_open():
-            # مقارنة ساعية: المتوسط اليومي ÷ 5 ساعات تداول
-            reference_avg = hist_avg / 5.0
-        else:
-            # مقارنة جلسة كاملة: المتوسط اليومي مباشرة
-            reference_avg = hist_avg
-
-        volume_ratio = current_vol / reference_avg if reference_avg > 0 else 0.0
-
-        # التصنيف
-        if volume_ratio >= ACTIVITY_THRESHOLDS['ACTIVE']:
-            status = 'ACTIVE'
-            eligible = True
-        elif volume_ratio >= ACTIVITY_THRESHOLDS['AWAKENING']:
-            status = 'AWAKENING'
-            eligible = True
-        else:
-            status = 'DORMANT'
-            eligible = False
-
+    def _dormant(self, symbol: str, candles: int, reason: str) -> Dict:
         return {
             'symbol': symbol,
-            'status': status,
-            'volume_ratio': round(volume_ratio, 3),
-            'current_volume': current_vol,
-            'historical_avg_volume': hist_avg,
-            'candle_count': candle_count,
-            'eligible': eligible,
-            'reason': f'volume_ratio={volume_ratio:.2f}'
+            'status': 'DORMANT',
+            'volume_ratio': 0.0,
+            'current_volume': 0.0,
+            'historical_avg_volume': 0.0,
+            'candle_count': candles,
+            'eligible': False,
+            'reason': reason
         }
 
     # ── الدالة الرئيسية: جلب الكون الكامل ─────────────────────────────────────
@@ -317,16 +212,7 @@ class SymbolUniverse:
     ) -> Tuple[List[str], List[Dict]]:
         """
         يُعيد قائمة الأسهم النشطة حالياً بناءً على سيولتها الذاتية.
-
-        Args:
-            timeframe: الإطار الزمني للتحليل
-            use_cache: استخدام Redis cache (5 دقائق)
-            include_awakening: تضمين الأسهم في مرحلة الصحوة
-
-        Returns:
-            (active_symbols, full_classification)
         """
-        # محاولة الكاش أولاً
         if use_cache:
             cached = redis_manager.get(UNIVERSE_CACHE_KEY)
             if cached:
@@ -334,23 +220,18 @@ class SymbolUniverse:
                 self.logger.debug(f"📦 Universe from cache: {len(symbols)} active symbols")
                 return symbols, cached
 
-        # اكتشاف كل الرموز
         all_symbols = self.discover_all_symbols()
-
         if not all_symbols:
             self.logger.warning("⚠️ No symbols found in DB — market_data.ohlcv is empty")
             return [], []
 
-        # تصنيف كل سهم
         classifications = []
         for symbol in all_symbols:
             classification = self.classify_symbol(symbol, timeframe)
             classifications.append(classification)
 
-        # ترتيب حسب volume_ratio تنازلياً
         classifications.sort(key=lambda x: x['volume_ratio'], reverse=True)
 
-        # الأسهم المؤهلة
         active_symbols = [
             r['symbol'] for r in classifications
             if r['eligible'] and (
@@ -359,17 +240,15 @@ class SymbolUniverse:
             )
         ]
 
-        # إحصائيات
-        active_count = sum(1 for r in classifications if r['status'] == 'ACTIVE')
+        active_count   = sum(1 for r in classifications if r['status'] == 'ACTIVE')
         awakening_count = sum(1 for r in classifications if r['status'] == 'AWAKENING')
-        dormant_count = sum(1 for r in classifications if r['status'] == 'DORMANT')
+        dormant_count  = sum(1 for r in classifications if r['status'] == 'DORMANT')
 
         self.logger.info(
             f"🌍 Universe scan complete: {len(all_symbols)} total | "
             f"ACTIVE={active_count} | AWAKENING={awakening_count} | DORMANT={dormant_count}"
         )
 
-        # حفظ في Redis
         if use_cache:
             redis_manager.set(UNIVERSE_CACHE_KEY, classifications, ttl=UNIVERSE_CACHE_TTL)
 
@@ -378,24 +257,10 @@ class SymbolUniverse:
     def get_best_strategy_for_symbol(self, symbol: str) -> Optional[Dict]:
         """
         يجلب أفضل استراتيجية مُكتشَفة لسهم معين من نتائج الـ Scientist.
-
-        يبحث في strategies.backtest_results عن أعلى sharpe_ratio
-        لهذا السهم تحديداً.
-
-        Returns:
-            {
-                'strategy_name': 'genetic_2222_v3',
-                'parameters': {...},
-                'sharpe_ratio': 1.85,
-                'total_return': 0.23,
-                'win_rate': 0.62,
-                'source': 'scientist'  # أو 'default'
-            }
         """
         try:
-            # 1. البحث في نتائج الـ Scientist
             with db.get_session() as session:
-                query = text("""
+                result = session.execute(text("""
                     SELECT strategy_name, parameters, sharpe_ratio,
                            total_return, win_rate, created_at
                     FROM strategies.backtest_results
@@ -404,8 +269,7 @@ class SymbolUniverse:
                       AND sharpe_ratio > 0
                     ORDER BY sharpe_ratio DESC
                     LIMIT 1
-                """)
-                result = session.execute(query, {'symbol': symbol})
+                """), {'symbol': symbol})
                 row = result.fetchone()
 
             if row:
@@ -420,46 +284,37 @@ class SymbolUniverse:
                     'source': 'scientist',
                     'created_at': str(row[5])
                 }
-
         except Exception as e:
             self.logger.debug(f"No scientist result for {symbol}: {e}")
 
-        # 2. لا توجد نتائج Scientist → يُعيد None (لا معاملات ثابتة)
         return None
 
     def get_symbols_needing_scientist(self, limit: int = 10) -> List[str]:
         """
         يُعيد قائمة الأسهم النشطة التي لم يُجرِ عليها الـ Scientist بعد
         أو التي مضى على آخر تحليل أكثر من 7 أيام.
-
-        هذه الأسهم تُعطى أولوية لتشغيل الـ Scientist عليها.
         """
         try:
             active_symbols, _ = self.get_active_universe(use_cache=True)
-
             if not active_symbols:
                 return []
 
             with db.get_session() as session:
-                query = text("""
+                result = session.execute(text("""
                     SELECT symbol, MAX(created_at) as last_run
                     FROM strategies.backtest_results
                     WHERE symbol = ANY(:symbols)
                     GROUP BY symbol
-                """)
-                result = session.execute(query, {'symbols': active_symbols})
+                """), {'symbols': active_symbols})
                 analyzed = {row[0]: row[1] for row in result.fetchall()}
 
-            # الأسهم التي لم تُحلَّل أو تجاوزت 7 أيام
             stale_cutoff = datetime.utcnow() - timedelta(days=7)
             needs_scientist = []
-
             for symbol in active_symbols:
                 last_run = analyzed.get(symbol)
                 if last_run is None or last_run < stale_cutoff:
                     needs_scientist.append(symbol)
 
-            # ترتيب عشوائي لتوزيع العمل
             import random
             random.shuffle(needs_scientist)
 
@@ -467,7 +322,6 @@ class SymbolUniverse:
                 f"🔬 Symbols needing Scientist: {len(needs_scientist)} "
                 f"(showing top {min(limit, len(needs_scientist))})"
             )
-
             return needs_scientist[:limit]
 
         except Exception as e:
@@ -483,11 +337,9 @@ symbol_universe = SymbolUniverse()
 if __name__ == "__main__":
     from loguru import logger as log
 
-    log.info("=== Symbol Universe Test ===")
+    log.info("=== Symbol Universe Test (v3 — SQL-based) ===")
 
     universe = SymbolUniverse()
-
-    # اكتشاف الكون الكامل
     active, classifications = universe.get_active_universe(use_cache=False)
 
     log.info(f"\n{'Symbol':<10} {'Status':<12} {'Ratio':<8} {'Candles':<10} {'Eligible'}")
@@ -499,9 +351,8 @@ if __name__ == "__main__":
         )
 
     log.info(f"\n✅ Active universe: {len(active)} symbols")
-    log.info(f"Active symbols: {active[:10]}...")
+    log.info(f"Active symbols (top 10): {active[:10]}")
 
-    # اختبار أفضل استراتيجية
     if active:
         best = universe.get_best_strategy_for_symbol(active[0])
         if best:
@@ -510,6 +361,5 @@ if __name__ == "__main__":
         else:
             log.info(f"\n🔬 {active[0]} needs Scientist analysis")
 
-    # الأسهم التي تحتاج Scientist
     needs = universe.get_symbols_needing_scientist(limit=5)
     log.info(f"\n🔬 Needs Scientist: {needs}")
