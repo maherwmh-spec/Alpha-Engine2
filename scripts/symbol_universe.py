@@ -300,12 +300,15 @@ class SymbolUniverse:
                 return []
 
             with db.get_session() as session:
-                result = session.execute(text("""
+                # استخدام IN بدلاً من ANY لتجنب مشاكل SQLAlchemy مع PostgreSQL arrays
+                placeholders = ','.join([f':s{i}' for i in range(len(active_symbols))])
+                params = {f's{i}': sym for i, sym in enumerate(active_symbols)}
+                result = session.execute(text(f"""
                     SELECT symbol, MAX(created_at) as last_run
                     FROM strategies.backtest_results
-                    WHERE symbol = ANY(:symbols)
+                    WHERE symbol IN ({placeholders})
                     GROUP BY symbol
-                """), {'symbols': active_symbols})
+                """), params)
                 analyzed = {row[0]: row[1] for row in result.fetchall()}
 
             stale_cutoff = datetime.utcnow() - timedelta(days=7)
