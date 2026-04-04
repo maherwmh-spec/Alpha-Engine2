@@ -170,8 +170,8 @@ class TechnicalMiner:
             advanced_analysis = analyze_stock_advanced(df)
             
             # ===== TREND & VOLATILITY =====
-            trend = detect_trend(df)
-            volatility = calculate_volatility(df)
+            trend = detect_trend(df['close'].tolist())
+            volatility = calculate_volatility(df['close'].tolist())
             
             # ===== COMPILE RESULTS =====
             analysis = {
@@ -404,11 +404,42 @@ class TechnicalMiner:
     def _save_to_database(self, analysis: Dict):
         """Save analysis to database"""
         try:
-            insert_technical_indicators(
-                symbol=analysis['symbol'],
-                timeframe=analysis['timeframe'],
-                data=analysis
-            )
+            # استخراج التوقيت: من حقل timestamp في analysis، أو الوقت الحالي
+            ts = analysis.get('timestamp')
+            if ts is None:
+                ts = datetime.utcnow()
+            elif hasattr(ts, 'to_pydatetime'):
+                ts = ts.to_pydatetime()
+            elif not isinstance(ts, datetime):
+                ts = datetime.utcnow()
+
+            indicators = {
+                'rsi':         analysis.get('rsi'),
+                'macd':        analysis.get('macd'),
+                'macd_signal': analysis.get('macd_signal'),
+                'macd_hist':   analysis.get('macd_hist'),
+                'bb_upper':    analysis.get('bb_upper'),
+                'bb_middle':   analysis.get('bb_middle'),
+                'bb_lower':    analysis.get('bb_lower'),
+                'ema_9':       analysis.get('ema_20'),   # أقرب متاح
+                'ema_21':      analysis.get('ema_50'),   # أقرب متاح
+                'sma_50':      analysis.get('ema_50'),
+                'sma_200':     analysis.get('sma_200'),
+                'atr':         analysis.get('atr'),
+                'stoch_k':     analysis.get('stoch_k'),
+                'stoch_d':     analysis.get('stoch_d'),
+                'adx':         analysis.get('adx'),
+                'obv':         analysis.get('obv'),
+            }
+
+            with db.get_session() as session:
+                insert_technical_indicators(
+                    session=session,
+                    symbol=analysis['symbol'],
+                    timeframe=analysis['timeframe'],
+                    timestamp=ts,
+                    indicators=indicators
+                )
         except Exception as e:
             self.logger.error(f"Error saving to database: {e}")
     
