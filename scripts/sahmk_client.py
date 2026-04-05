@@ -42,31 +42,44 @@ from scripts.sector_calculator import (
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TASI Symbol Filter
-# فلتر رموز تاسي (السوق الرئيسي فقط)
-# القاعدة: طول الرمز = 4 أرقام AND يبدأ بـ [1-8]
-# مستبعد: أسهم نمو وETFs التي تبدأ بـ 9 (مثال: 9401, 9510, 9520)
-# مستبعد أيضاً: رموز القطاعات 900xx (5 أرقام، تبدأ بـ 9)
+# TASI + Sector Symbol Filter
+# فلتر رموز تاسي (السوق الرئيسي) + القطاعات والمؤشر
+#
+# مسموح:
+#   أسهم تاسي الرئيسي : 4 أرقام، يبدأ بـ [1-8]   → 2222, 1120, 8010 ...
+#   القطاعات + المؤشر: يبدأ بـ 900            → 90001, 90010 ... 90030
+#
+# مستبعد:
+#   أسهم نمو/ETFs    : 4 أرقام، يبدأ بـ 9 (ليس 900) → 9401, 9510, 9520 ...
 # ─────────────────────────────────────────────────────────────────────────────
-_TASI_SYMBOL_RE = re.compile(r'^[1-8][0-9]{3}$')
 
 
+def is_tasi_or_sector(symbol: str) -> bool:
+    """
+    Returns True for any symbol that should be stored/processed:
+      - TASI main-market stocks : 4 digits, first digit in [1-8]
+                                  e.g. 2222, 1120, 8010, 8170
+      - Sector / TASI index     : starts with '900'
+                                  e.g. 90001 (TASI), 90010-90030 (sectors)
+
+    Returns False (blocked) for:
+      - Nomu / ETFs             : 4 digits starting with 9 (not 900)
+                                  e.g. 9401, 9510, 9520, 9300
+    """
+    s = str(symbol).strip()
+    if s.startswith('900'):                    # المؤشر + القطاعات دائماً مسموح
+        return True
+    if len(s) == 4 and s[0] in '12345678':    # أسهم تاسي الرئيسي
+        return True
+    return False
+
+
+# توافق للخلف — لا تزال مستخدمة في بعض الأماكن
+# Backward-compat alias kept for any remaining call sites
 def is_tasi_symbol(symbol: str) -> bool:
-    """
-    Returns True only for TASI main-market stock symbols.
-    Rule: exactly 4 digits AND starts with 1-8.
-    Excludes: Nomu (نمو) and ETFs starting with 9 (e.g. 9401, 9510, 9520).
-    Excludes: Sector/index symbols 900xx (5-digit, start with 9).
-
-    Examples:
-        is_tasi_symbol('2222')  → True
-        is_tasi_symbol('1120')  → True
-        is_tasi_symbol('8010')  → True
-        is_tasi_symbol('9401')  → False  (Nomu/ETF)
-        is_tasi_symbol('9510')  → False  (ETF)
-        is_tasi_symbol('90001') → False  (sector index)
-    """
-    return bool(_TASI_SYMBOL_RE.match(str(symbol)))
+    """Deprecated alias — use is_tasi_or_sector() instead."""
+    s = str(symbol).strip()
+    return len(s) == 4 and s[0] in '12345678'
 
 
 class SahmkAPIError(Exception):
@@ -462,10 +475,9 @@ class SahmkClient:
     def get_symbols_list(self) -> List[str]:
         """Fetch list of TASI main-market symbols + sector/index symbols.
 
-        فلتر الرموز:
-        - أسهم تاسي: regex ^[1-8][0-9]{3}$ (طول 4 أرقام، يبدأ بـ 1-8)
-        - مستبعد: أسهم نمو وETFs التي تبدأ بـ 9 (مثال: 9401, 9510, 9520)
-        - مُضاف دائماً: رموز القطاعات والمؤشر العام 900xx
+        فلتر الرموز باستخدام is_tasi_or_sector():
+        - مسموح: أسهم تاسي (4 أرقام، يبدأ بـ 1-8) + قطاعات 900xx
+        - مستبعد: أسهم نمو/ETFs (4 أرقام تبدأ بـ 9، ليس 900)
         """
         try:
             self.logger.info("📋 Fetching TASI symbols list (stocks + sectors + index)")
@@ -489,25 +501,26 @@ class SahmkClient:
                     if sym:
                         raw_symbols.append(sym)
 
-            # ── الفلتر القوي: فقط رموز تاسي الرئيسي ^[1-8][0-9]{3}$ ──
-            tasi_symbols = []
-            excluded_9xx  = []
+            # ── الفلتر باستخدام is_tasi_or_sector() ──
+            passed_symbols = []
+            excluded_9xx   = []
             excluded_other = []
 
             for sym in raw_symbols:
-                if is_tasi_symbol(sym):
-                    if sym not in tasi_symbols:
-                        tasi_symbols.append(sym)
-                elif sym.startswith('9') and len(sym) == 4:
-                    # أسهم نمو أو ETFs (4 أرقام تبدأ بـ 9)
+                if is_tasi_or_sector(sym):
+                    if sym not in passed_symbols:
+                        passed_symbols.append(sym)
+                elif sym.startswith('9') and not sym.startswith('900'):
+                    # أسهم نمو أو ETFs (4 أرقام تبدأ بـ 9، ليس 900)
                     excluded_9xx.append(sym)
-                elif not is_sector_symbol(sym):
-                    # رموز أخرى غير معروفة (ليست قطاعات)
+                else:
                     excluded_other.append(sym)
 
             # ── Logging واضح ──
+            tasi_count   = sum(1 for s in passed_symbols if len(s) == 4 and s[0] in '12345678')
+            sector_count = sum(1 for s in passed_symbols if s.startswith('900'))
             self.logger.info(
-                f"🔍 TASI symbols filtered: {len(tasi_symbols)} symbols "
+                f"🔍 TASI symbols filtered: {tasi_count} TASI stocks + {sector_count} sectors/index "
                 f"(Nomu and ETFs starting with 9 excluded)"
             )
             if excluded_9xx:
@@ -518,12 +531,12 @@ class SahmkClient:
                 )
             if excluded_other:
                 self.logger.debug(
-                    f"⚠️  Excluded {len(excluded_other)} other non-TASI symbols: "
+                    f"⚠️  Excluded {len(excluded_other)} other unrecognised symbols: "
                     f"{excluded_other[:5]}"
                 )
 
-            # ── إضافة القطاعات والمؤشر العام دائماً ──
-            symbols = tasi_symbols.copy()
+            # ── ضمان وجود كل رموز القطاعات والمؤشر العام دائماً ──
+            symbols = passed_symbols.copy()
             for sector_sym in self.SECTOR_SYMBOLS:
                 if sector_sym not in symbols:
                     symbols.append(sector_sym)
@@ -532,7 +545,7 @@ class SahmkClient:
                 redis_manager.set('sahmk:symbols_list', symbols, ttl=3600)
                 self.logger.success(
                     f"✅ Symbols list ready: {len(symbols)} total "
-                    f"({len(tasi_symbols)} TASI stocks + {len(self.SECTOR_SYMBOLS)} sectors/index)"
+                    f"({tasi_count} TASI stocks + {len(self.SECTOR_SYMBOLS)} sectors/index)"
                 )
 
             return symbols

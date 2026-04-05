@@ -31,7 +31,7 @@ from loguru import logger
 
 from config.config_manager import config
 from scripts.redis_manager import redis_manager
-from scripts.sahmk_client import SahmkClient, get_sahmk_client, is_tasi_symbol
+from scripts.sahmk_client import SahmkClient, get_sahmk_client, is_tasi_or_sector
 from scripts.utils import get_saudi_time, is_trading_hours
 from scripts.sector_calculator import (
     compute_sector_candles_from_db,
@@ -193,20 +193,20 @@ class MarketReporter:
         للقطاعات (900xx): source = 'db_sector_calculator'
         للأسهم العادية:   source = 'sahmk_websocket'
 
-        فلتر الحفظ:
-        - يُسمح فقط بـ: أسهم تاسي ^[1-8][0-9]{3}$ أو رموز قطاعات 900xx
-        - مستبعد: أي رمز يبدأ بـ 9 وطوله 4 أرقام (نمو/ETFs)
+        فلتر الحفظ باستخدام is_tasi_or_sector():
+        - مسموح: أسهم تاسي (4 أرقام، يبدأ بـ 1-8) + قطاعات 900xx
+        - مستبعد: أي رمز يبدأ بـ 9 وليس 900 (نمو/ETFs مثل 9401, 9510)
         """
         if DB_POOL is None:
             self.logger.warning("DB pool not available, skipping candle save.")
             return
 
-        # ── فلتر الحفظ: استبعاد رموز 9xx (نمو/ETFs) ──
+        # ── فلتر الحفظ: استبعاد رموز 9xx غير 900 (نمو/ETFs) ──
         symbol = candle.get('symbol', '')
-        if not is_tasi_symbol(symbol) and not is_sector_symbol(symbol):
+        if not is_tasi_or_sector(symbol):
             self.logger.warning(
-                f"🚫 SAVE BLOCKED: symbol '{symbol}' is not a valid TASI or sector symbol "
-                f"(starts with 9 or invalid format) — skipping DB save"
+                f"🚫 SAVE BLOCKED: symbol '{symbol}' is Nomu/ETF "
+                f"(starts with 9, not 900) — skipping DB save"
             )
             return
 
@@ -566,23 +566,23 @@ class MarketReporter:
     ) -> List[str]:
         """Applies a very light filter to exclude dead stocks, then returns all symbols.
 
-        فلتر الرموز (مرحلة أولى):
-        - يستبعد جميع رموز 9xx (4 أرقام تبدأ بـ 9) — نمو/ETFs
-        - يبقي فقط: أسهم تاسي ^[1-8][0-9]{3}$ + رموز القطاعات 900xx
+        فلتر الرموز باستخدام is_tasi_or_sector():
+        - مسموح: أسهم تاسي (4 أرقام، يبدأ بـ 1-8) + قطاعات 900xx
+        - مستبعد: أسهم نمو/ETFs (4 أرقام تبدأ بـ 9، ليس 900)
         """
         # redis_manager.get is SYNC — no await
         cached = redis_manager.get('filtered_symbols:ready')
         if cached:
             return cached
 
-        # ── الفلتر الأول: استبعاد رموز 9xx (نمو/ETFs) قبل أي شيء ──
+        # ── الفلتر الأول: استبعاد رموز 9xx غير 900 (نمو/ETFs) باستخدام is_tasi_or_sector() ──
         excluded_9xx = [
             s for s in all_symbols
-            if s.startswith('9') and len(s) == 4
+            if s.startswith('9') and not s.startswith('900')
         ]
         tasi_only = [
             s for s in all_symbols
-            if is_tasi_symbol(s) or is_sector_symbol(s)
+            if is_tasi_or_sector(s)
         ]
 
         if excluded_9xx:
@@ -591,8 +591,10 @@ class MarketReporter:
                 f"(Nomu/ETFs) from analysis: {sorted(excluded_9xx)[:10]}"
                 f"{'...' if len(excluded_9xx) > 10 else ''}"
             )
+        tasi_count   = sum(1 for s in tasi_only if len(s) == 4 and s[0] in '12345678')
+        sector_count = sum(1 for s in tasi_only if s.startswith('900'))
         self.logger.info(
-            f"🔍 TASI symbols filtered: {len(tasi_only)} symbols "
+            f"🔍 TASI symbols filtered: {tasi_count} TASI stocks + {sector_count} sectors/index "
             f"(Nomu and ETFs starting with 9 excluded)"
         )
         self.logger.info(f"🔍 Filtering {len(tasi_only)} TASI+sector symbols (after 9xx exclusion)...")
