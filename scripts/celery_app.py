@@ -105,10 +105,17 @@ app.conf.beat_schedule = {
         'options': {'queue': 'normal'}
     },
     
-    # Scientist - every hour
+    # Scientist (DEAP legacy) - every hour
     'scientist-run': {
         'task': 'bots.scientist.tasks.run_scientist',
         'schedule': 3600.0,
+        'options': {'queue': 'low_priority'}
+    },
+
+    # Genetic Engine v2 - every 4 hours (Generator + Evaluator cycle)
+    'genetic-engine-run': {
+        'task': 'bots.scientist.tasks.run_genetic_cycle',
+        'schedule': 14400.0,   # 4 hours
         'options': {'queue': 'low_priority'}
     },
     
@@ -167,6 +174,8 @@ app.autodiscover_tasks([
     'bots.technical_miner',
     'bots.market_reporter',
     'bots.scientist',
+    'bots.generator',
+    'bots.evaluator',
     'bots.strategic_analyzer',
     'bots.monitor',
     'bots.behavioral_analyzer',

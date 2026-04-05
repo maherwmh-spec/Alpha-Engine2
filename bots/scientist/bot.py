@@ -1349,3 +1349,195 @@ if __name__ == "__main__":
         except Exception as e:
             self.logger.error(f"[MonteCarlo] Error: {e}")
             return {'status': 'error', 'pass_rate': 0.0, 'robust': False, 'verdict': 'ERROR'}
+
+
+    # ═══════════════════════════════════════════════════════════
+    # ── المحرك الجيني الجديد (Alpha-Engine v2) ──────────────
+    # يعمل بالتوازي مع DEAP الموجود، ويُكمله
+    # ═══════════════════════════════════════════════════════════
+
+    def run_genetic_cycle(
+        self,
+        symbols: Optional[List[str]] = None,
+        generations: int = 10,
+        population_size: int = 30,
+        elite_ratio: float = 0.20,
+        mutation_rate: float = 0.15,
+        min_fitness_to_save: float = 0.05,
+    ) -> Dict:
+        """
+        يُشغّل دورة التطور الجيني الكاملة باستخدام Generator + Evaluator الجديدَين.
+
+        Args:
+            symbols:            قائمة الأسهم (None = اختيار تلقائي من DB)
+            generations:        عدد الأجيال
+            population_size:    حجم المجتمع
+            elite_ratio:        نسبة النخبة
+            mutation_rate:      معدل الطفرة
+            min_fitness_to_save: الحد الأدنى للحفظ
+
+        Returns:
+            ملخص الدورة: {symbols_processed, total_elite, objectives_run, elapsed_sec}
+        """
+        import asyncio
+        import time
+        from bots.generator.bot import GeneticGenerator, PROFIT_OBJECTIVES
+        from bots.evaluator.bot import StrategyEvaluator
+
+        self.logger.info(
+            "🧬 [GeneticCycle] Starting new evolution cycle "
+            f"(gen={generations}, pop={population_size})"
+        )
+        start_time = time.time()
+
+        # ── اختيار الأسهم ──
+        if not symbols:
+            symbols = self._pick_symbols_for_genetic_cycle()
+
+        generator = GeneticGenerator()
+        evaluator = StrategyEvaluator(db_pool=None)  # db_pool يُمرَّر عند الإنتاج
+
+        total_elite = 0
+        objectives_run = 0
+
+        for symbol in symbols:
+            for objective in PROFIT_OBJECTIVES:
+                try:
+                    elite_count = self._run_evolution_loop(
+                        generator=generator,
+                        evaluator=evaluator,
+                        symbol=symbol,
+                        objective=objective,
+                        generations=generations,
+                        population_size=population_size,
+                        elite_ratio=elite_ratio,
+                        mutation_rate=mutation_rate,
+                        min_fitness_to_save=min_fitness_to_save,
+                    )
+                    total_elite += elite_count
+                    objectives_run += 1
+                except Exception as e:
+                    self.logger.error(
+                        f"❌ [GeneticCycle] Failed {symbol} [{objective}]: {e}"
+                    )
+
+        elapsed = round(time.time() - start_time, 1)
+        summary = {
+            "symbols_processed": len(symbols),
+            "objectives_run":    objectives_run,
+            "total_elite":       total_elite,
+            "elapsed_sec":       elapsed,
+        }
+        self.logger.info(
+            f"✅ [GeneticCycle] Done in {elapsed}s — "
+            f"{total_elite} elite strategies across {len(symbols)} symbols"
+        )
+        return summary
+
+    def _run_evolution_loop(
+        self,
+        generator,
+        evaluator,
+        symbol: str,
+        objective: str,
+        generations: int,
+        population_size: int,
+        elite_ratio: float,
+        mutation_rate: float,
+        min_fitness_to_save: float,
+    ) -> int:
+        """
+        حلقة التطور الداخلية لسهم وهدف واحد.
+        تُعيد عدد الاستراتيجيات النخبة المحفوظة.
+        """
+        import asyncio
+
+        self.logger.info(
+            f"  🔬 Evolving {symbol} [{objective}] — "
+            f"{generations} gen × {population_size} pop"
+        )
+
+        # ── الجيل الأول ──
+        population = generator.generate_population(
+            symbol, objective, size=population_size
+        )
+
+        loop = asyncio.new_event_loop()
+        evaluated_pop = []
+
+        try:
+            for gen in range(1, generations + 1):
+                # تعيين رقم الجيل
+                for ind in population:
+                    ind["generation"] = gen
+
+                # التقييم
+                tasks = [evaluator.evaluate(ind) for ind in population]
+                results = loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
+
+                # دمج النتائج
+                for ind, result in zip(population, results):
+                    if isinstance(result, Exception):
+                        ind["fitness_score"] = 0.0
+                    else:
+                        ind["fitness_score"] = result.get("fitness_score", 0.0)
+                        for key in [
+                            "total_profit_pct", "win_rate", "total_trades",
+                            "avg_profit_pct", "max_drawdown_pct", "sharpe_ratio",
+                            "profit_factor", "avg_duration_min",
+                        ]:
+                            ind[key] = result.get(key, 0)
+
+                # ترتيب
+                population.sort(
+                    key=lambda x: x.get("fitness_score", 0.0), reverse=True
+                )
+                best = population[0].get("fitness_score", 0.0)
+                avg  = sum(x.get("fitness_score", 0.0) for x in population) / len(population)
+
+                self.logger.info(
+                    f"    Gen {gen:2d}/{generations} | {symbol} [{objective}] | "
+                    f"best={best:.4f} avg={avg:.4f}"
+                )
+
+                if gen == generations:
+                    evaluated_pop = population
+                    break
+
+                # اختيار النخبة وتوليد الجيل التالي
+                elite = generator.select_elite(population, elite_ratio)
+                population = generator.breed_next_generation(
+                    elite, target_size=population_size, mutation_rate=mutation_rate
+                )
+
+        finally:
+            loop.close()
+
+        # ── حفظ أفضل الاستراتيجيات في DB ──
+        elite_saved = 0
+        save_loop = asyncio.new_event_loop()
+        try:
+            for ind in evaluated_pop:
+                if ind.get("fitness_score", 0.0) >= min_fitness_to_save:
+                    saved = save_loop.run_until_complete(evaluator.save_strategy(ind))
+                    if saved:
+                        save_loop.run_until_complete(evaluator.save_result(ind))
+                        elite_saved += 1
+        finally:
+            save_loop.close()
+
+        self.logger.info(
+            f"  💾 Saved {elite_saved} elite strategies for {symbol} [{objective}]"
+        )
+        return elite_saved
+
+    def _pick_symbols_for_genetic_cycle(self, limit: int = 3) -> List[str]:
+        """يختار أسهماً للتحليل الجيني من Redis أو قائمة افتراضية."""
+        try:
+            cached = redis_manager.get("sahmk:symbols_list")
+            if cached and isinstance(cached, list):
+                tasi = [s for s in cached if len(str(s)) == 4 and str(s)[0] in "12345678"]
+                return tasi[:limit]
+        except Exception:
+            pass
+        return ["2222", "1120", "2010"][:limit]

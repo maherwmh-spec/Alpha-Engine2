@@ -83,6 +83,93 @@ scientist:
   # عدد الأسهم التي يُحلّلها الـ Scientist في كل دورة
   symbols_per_run: 5
 
+# ── Genetic Engine (المحرك الجيني — Alpha-Engine v2) ────────────
+genetic_engine:
+  # عدد الأجيال لكل سهم/هدف في كل دورة
+  generations: 10
+
+  # حجم المجتمع في كل جيل
+  population_size: 30
+
+  # نسبة النخبة المحتفظ بها بين الأجيال
+  elite_ratio: 0.20
+
+  # معدل الطفرة (0-1)
+  mutation_rate: 0.15
+
+  # عدد الأسهم التي يُحلّلها المحرك في كل دورة
+  symbols_per_run: 3
+
+  # الحد الأدنى لـ fitness_score للحفظ في DB
+  min_fitness_to_save: 0.05
+
+  # إعادة التحليل بعد N يوم
+  reanalysis_days: 7
+
+# ── الأهداف الربحية الأربعة (Profit Objectives) ─────────────────
+profit_objectives:
+  scalping:
+    description: "مضاربة خاطفة — صفقات سريعة جداً"
+    timeframe: "1m"
+    stoploss_range: [-0.005, -0.015]
+    roi_range: [0.005, 0.02]
+    trailing_stop: true
+    fitness_formula: "win_rate×0.50 + avg_profit×0.30 + profit_factor×0.10 - drawdown×0.10"
+
+  short_swings:
+    description: "موجات قصيرة — صفقات خلال اليوم"
+    timeframe: "5m"
+    stoploss_range: [-0.015, -0.03]
+    roi_range: [0.03, 0.08]
+    trailing_stop: true
+    fitness_formula: "total_profit×0.40 + win_rate×0.30 + sharpe×0.20 - drawdown×0.10"
+
+  medium_trends:
+    description: "موجات متوسطة — صفقات متعددة الأيام"
+    timeframe: "15m"
+    stoploss_range: [-0.03, -0.06]
+    roi_range: [0.08, 0.20]
+    trailing_stop: false
+    fitness_formula: "total_profit×0.50 + sharpe×0.30 - drawdown×0.20"
+
+  momentum:
+    description: "انفجارات سعرية — صفقات زخم قوية"
+    timeframe: "5m"
+    stoploss_range: [-0.02, -0.04]
+    roi_range: [0.05, 0.15]
+    trailing_stop: true
+    fitness_formula: "total_profit×0.60 + profit_factor×0.20 - drawdown×0.20"
+
+# ── صناديق المخاطر الأربعة (Risk Boxes) ─────────────────────────
+risk_boxes:
+  speculation:
+    linked_objective: "scalping"
+    description: "تخصيص منخفض جداً — مخاطر عالية"
+    max_allocation_pct: 5
+    max_open_trades: 2
+    color: "#FF4444"
+
+  growth:
+    linked_objective: "short_swings"
+    description: "تخصيص متوسط — مخاطر متوسطة"
+    max_allocation_pct: 15
+    max_open_trades: 5
+    color: "#FF8C00"
+
+  investment:
+    linked_objective: "medium_trends"
+    description: "تخصيص عالٍ — مخاطر منخفضة"
+    max_allocation_pct: 30
+    max_open_trades: 10
+    color: "#2196F3"
+
+  big_strategy:
+    linked_objective: "momentum"
+    description: "تخصيص ATR-based — استراتيجيات كبيرة"
+    max_allocation_pct: 25
+    max_open_trades: 3
+    color: "#4CAF50"
+
 # ── Strategic Analyzer (التحليل الاستكشافي) ──────────────────
 strategic_analyzer:
   # الحد الأدنى للثقة لإشارات الـ Scientist
