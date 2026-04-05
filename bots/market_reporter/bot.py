@@ -35,6 +35,8 @@ from scripts.sahmk_client import SahmkClient, get_sahmk_client, is_tasi_or_secto
 from scripts.utils import get_saudi_time, is_trading_hours
 from scripts.sector_calculator import (
     compute_sector_candles_from_db,
+    save_sector_candles_to_db,
+    save_index_to_db,
     is_sector_symbol,
     SECTOR_DISPLAY_NAMES,
 )
@@ -690,20 +692,21 @@ class MarketReporter:
                     "waiting for stock candles to accumulate in DB (normal at startup)"
                 )
                 continue
-
-            # ── حفظ كل شمعة في DB ───────────────────────────────────────────
+            # ── حفظ القطاعات في sector_candles + المؤشر في indices ────────────────────────
             try:
-                save_tasks = [
-                    self._save_candle_to_db(candle)
-                    for candle in all_candles.values()
-                ]
-                await asyncio.gather(*save_tasks, return_exceptions=True)
+                async with DB_POOL.acquire() as save_conn:
+                    # 1. حفظ جميع الشمع (قطاعات + مؤشر) في sector_candles
+                    saved_count = await save_sector_candles_to_db(save_conn, all_candles)
+
+                    # 2. حفظ المؤشر العام (90001) بشكل منفصل في indices
+                    if '90001' in all_candles:
+                        await save_index_to_db(save_conn, all_candles['90001'])
 
                 tasi_ok = '✅' if '90001' in all_candles else '❌'
-                source  = all_candles[next(iter(all_candles))].get('source', 'unknown')
+                sector_count = len([s for s in all_candles if s != '90001'])
                 self.logger.success(
-                    f"✅ Sector data saved: {len(all_candles)} candles "
-                    f"(TASI={tasi_ok}, source={source})"
+                    f"✅ Sector data saved to sector_candles: {saved_count} rows "
+                    f"(TASI={tasi_ok}, sectors={sector_count})"
                 )
             except Exception as e:
                 self.logger.error(f"❌ Sector save error: {e}", exc_info=True)

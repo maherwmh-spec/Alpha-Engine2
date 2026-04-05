@@ -52,20 +52,66 @@ class SymbolUniverse:
     # ── الاكتشاف الكامل ────────────────────────────────────────────────────────
 
     def discover_all_symbols(self) -> List[str]:
-        """يجلب كل الرموز الموجودة في market_data.ohlcv (باستثناء القطاعات 9xxxx)."""
+        """
+        يجلب قائمة أسهم تاسي الرئيسي.
+
+        المصدر الأولوي: market_data.symbols (القائمة المتزامنة يومياً من SAHMK)
+        الفالباك: market_data.ohlcv (إذا كان جدول symbols فارغاً أو غير متاح)
+
+        فلتر مضمون: فقط رموز تاسي (4 أرقام تبدأ بـ 1-8)
+        مستبعد: نمو (9xxx) + ETFs + قطاعات (900xx)
+        """
+        # ── المصدر الأولوي: market_data.symbols ───────────────────────────────────
+        try:
+            with db.get_session() as session:
+                result = session.execute(text("""
+                    SELECT symbol
+                    FROM market_data.symbols
+                    WHERE market = 'TASI'
+                      AND is_active = TRUE
+                      AND symbol ~ '^[1-8][0-9]{3}$'
+                    ORDER BY symbol
+                """))
+                symbols = [row[0] for row in result.fetchall()]
+
+            if symbols:
+                self.logger.info(
+                    f"📊 discover_all_symbols: {len(symbols)} TASI symbols "
+                    f"from market_data.symbols (primary source)"
+                )
+                return symbols
+
+            # جدول symbols فارغ — استخدم fallback
+            self.logger.warning(
+                "⚠️ market_data.symbols is empty — "
+                "falling back to ohlcv. Run: python3 scripts/sync_symbols.py"
+            )
+
+        except Exception as e:
+            self.logger.warning(
+                f"⚠️ market_data.symbols unavailable ({e}) — "
+                "falling back to ohlcv discovery"
+            )
+
+        # ── Fallback: market_data.ohlcv ───────────────────────────────────────────────
         try:
             with db.get_session() as session:
                 result = session.execute(text("""
                     SELECT DISTINCT symbol
                     FROM market_data.ohlcv
-                    WHERE symbol NOT LIKE '9%'
+                    WHERE symbol ~ '^[1-8][0-9]{3}$'
                     ORDER BY symbol
                 """))
                 symbols = [row[0] for row in result.fetchall()]
-            self.logger.info(f"📊 Discovered {len(symbols)} symbols in DB")
+
+            self.logger.info(
+                f"📊 discover_all_symbols: {len(symbols)} TASI symbols "
+                f"from ohlcv (fallback — run sync_symbols.py to populate symbols table)"
+            )
             return symbols
+
         except Exception as e:
-            self.logger.error(f"Error discovering symbols: {e}")
+            self.logger.error(f"❌ discover_all_symbols error: {e}")
             return []
 
     # ── التصنيف الرئيسي (SQL-based) ───────────────────────────────────────────

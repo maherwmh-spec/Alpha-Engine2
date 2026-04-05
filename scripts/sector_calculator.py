@@ -331,49 +331,69 @@ async def compute_sector_candles_from_db(conn) -> Dict[str, Dict]:
     """
     يحسب شمعة OHLCV لكل قطاع والمؤشر العام من آخر بيانات 1m في DB.
 
+    الاستراتيجية المُحسَّنة:
+      - أثناء التداول (09:30-15:10 KSA أيام العمل): آخر 10 دقائق (live)
+      - خارج التداول: يبحث عن آخر جلسة تداول مكتملة في آخر 7 أيام
+        (لا يعتمد على نافذة 90 دقيقة الثابتة التي تفشل بعد ساعتين)
+
     Args:
         conn: asyncpg connection أو pool.acquire() connection
 
     Returns:
-        Dict[sector_symbol → candle_dict] جاهز للحفظ في market_data.ohlcv
+        Dict[sector_symbol → candle_dict] جاهز للحفظ في market_data.sector_candles
     """
     import pytz
     riyadh_tz = pytz.timezone('Asia/Riyadh')
     now = datetime.now(tz=riyadh_tz)
-
-    # نافذة بحث تكيّفية:
-    # - أثناء التداول (09:30-15:10 KSA): آخر 10 دقائق
-    # - خارج التداول: آخر 90 دقيقة (لالتقاط آخر شمعة قبل الإغلاق)
     hour_min = now.hour * 60 + now.minute
     is_trading = (9 * 60 + 30) <= hour_min <= (15 * 60 + 10) and now.weekday() < 5
-    lookback_minutes = 10 if is_trading else 90
-    lookback = now - timedelta(minutes=lookback_minutes)
+
+    if is_trading:
+        # ── أثناء التداول: آخر 10 دقائق (live) ─────────────────────────────
+        lookback = now - timedelta(minutes=10)
+        lookback_desc = 'live (last 10m)'
+        sql = """
+        SELECT DISTINCT ON (symbol)
+            symbol, open, high, low, close, volume, time
+        FROM market_data.ohlcv
+        WHERE timeframe = '1m'
+          AND time >= $1
+          AND symbol ~ '^[1-8][0-9]{3}$'
+        ORDER BY symbol, time DESC;
+        """
+        sql_param = lookback
+    else:
+        # ── خارج التداول: آخر شمعة لكل سهم في آخر 7 أيام ───────────────────
+        # يلتقط آخر جلسة تداول مكتملة بغض النظر عن الوقت الحالي
+        lookback = now - timedelta(days=7)
+        lookback_desc = 'last-session (7d window)'
+        sql = """
+        SELECT DISTINCT ON (symbol)
+            symbol, open, high, low, close, volume, time
+        FROM market_data.ohlcv
+        WHERE timeframe = '1m'
+          AND time >= $1
+          AND symbol ~ '^[1-8][0-9]{3}$'
+        ORDER BY symbol, time DESC;
+        """
+        sql_param = lookback
 
     logger.debug(
         f'🕐 sector_calculator: now={now.strftime("%H:%M KSA")}, '
-        f'trading={is_trading}, lookback={lookback_minutes}m'
+        f'trading={is_trading}, mode={lookback_desc}'
     )
 
-    # ── جلب آخر شمعة لكل سهم من DB ──────────────────────────────────────────
-    sql = """
-    SELECT DISTINCT ON (symbol)
-        symbol, open, high, low, close, volume, time
-    FROM market_data.ohlcv
-    WHERE timeframe = '1m'
-      AND time >= $1
-      AND symbol ~ '^[0-9]{4}$'
-    ORDER BY symbol, time DESC;
-    """
     try:
-        rows = await conn.fetch(sql, lookback)
+        rows = await conn.fetch(sql, sql_param)
     except Exception as e:
         logger.error(f'❌ DB query error in compute_sector_candles_from_db: {e}')
         return {}
 
     if not rows:
         logger.warning(
-            f'⚠️ No stock candles found in DB for last {lookback_minutes} minutes '
-            f'(lookback={lookback.strftime("%H:%M:%S KSA")}, trading={is_trading})'
+            f'⚠️ No stock candles found in DB '
+            f'(mode={lookback_desc}, trading={is_trading}) — '
+            f'DB may be empty or no data in last 7 days'
         )
         return {}
 
@@ -477,11 +497,116 @@ async def compute_sector_candles_from_db(conn) -> Dict[str, Dict]:
     return result
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Sync wrapper (للاختبار المباشر)
-# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────────
+# حفظ شمع القطاعات في جدول sector_candles
+# ─────────────────────────────────────────────────────────────────────────────────
 
-def compute_sector_candles_sync(dsn: Optional[str] = None) -> Dict[str, Dict]:
+async def save_sector_candles_to_db(conn, candles: Dict[str, Dict]) -> int:
+    """
+    يحفظ شمع القطاعات والمؤشر في market_data.sector_candles (upsert).
+
+    Args:
+        conn: asyncpg connection
+        candles: ناتج compute_sector_candles_from_db()
+
+    Returns:
+        عدد الصفوف المحفوظة
+    """
+    if not candles:
+        return 0
+
+    upsert_sql = """
+    INSERT INTO market_data.sector_candles
+        (time, symbol, name, timeframe, open, high, low, close, volume, members_count, source)
+    VALUES
+        ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+    ON CONFLICT (symbol, timeframe, time)
+    DO UPDATE SET
+        open          = EXCLUDED.open,
+        high          = EXCLUDED.high,
+        low           = EXCLUDED.low,
+        close         = EXCLUDED.close,
+        volume        = EXCLUDED.volume,
+        members_count = EXCLUDED.members_count,
+        source        = EXCLUDED.source,
+        created_at    = NOW();
+    """
+
+    records = []
+    for c in candles.values():
+        records.append((
+            c.get('timestamp'),
+            c.get('symbol'),
+            c.get('name', ''),
+            c.get('timeframe', '1m'),
+            c.get('open', 0.0),
+            c.get('high', 0.0),
+            c.get('low', 0.0),
+            c.get('close', 0.0),
+            c.get('volume', 0),
+            c.get('members_count', 0),
+            c.get('source', 'db_sector_calculator'),
+        ))
+
+    try:
+        await conn.executemany(upsert_sql, records)
+        logger.info(
+            f'✅ save_sector_candles_to_db: {len(records)} candles saved to sector_candles '
+            f'(TASI={"90001" in candles})'
+        )
+        return len(records)
+    except Exception as e:
+        logger.error(f'❌ save_sector_candles_to_db error: {e}')
+        return 0
+
+
+async def save_index_to_db(conn, candle: Dict) -> bool:
+    """
+    يحفظ بيانات المؤشر في market_data.indices (upsert).
+    يُستخدم لحفظ TASI (90001) بشكل منفصل في جدول مخصص.
+    """
+    if not candle:
+        return False
+
+    upsert_sql = """
+    INSERT INTO market_data.indices
+        (time, symbol, name, timeframe, open, high, low, close, volume, source)
+    VALUES
+        ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    ON CONFLICT (symbol, timeframe, time)
+    DO UPDATE SET
+        open   = EXCLUDED.open,
+        high   = EXCLUDED.high,
+        low    = EXCLUDED.low,
+        close  = EXCLUDED.close,
+        volume = EXCLUDED.volume,
+        source = EXCLUDED.source,
+        created_at = NOW();
+    """
+
+    try:
+        await conn.execute(upsert_sql,
+            candle.get('timestamp'),
+            candle.get('symbol', '90001'),
+            candle.get('name', 'TASI - المؤشر العام'),
+            candle.get('timeframe', '1m'),
+            candle.get('open', 0.0),
+            candle.get('high', 0.0),
+            candle.get('low', 0.0),
+            candle.get('close', 0.0),
+            candle.get('volume', 0),
+            candle.get('source', 'db_sector_calculator'),
+        )
+        logger.debug(f'✅ save_index_to_db: TASI saved (close={candle.get("close", 0):.2f})')
+        return True
+    except Exception as e:
+        logger.error(f'❌ save_index_to_db error: {e}')
+        return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# Sync wrapper (للاختبار المباشر)
+# ───────────────────────────────────────────────────────────────────────────────── compute_sector_candles_sync(dsn: Optional[str] = None) -> Dict[str, Dict]:
     """
     Sync wrapper لـ compute_sector_candles_from_db.
     يُستخدم للاختبار المباشر فقط.
