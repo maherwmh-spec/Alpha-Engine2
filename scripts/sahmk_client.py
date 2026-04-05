@@ -18,6 +18,7 @@ FIX (403 Forbidden):
 """
 
 import os
+import re
 import asyncio
 import json
 import time
@@ -38,6 +39,34 @@ from scripts.sector_calculator import (
     is_sector_symbol,
     SECTOR_DISPLAY_NAMES,
 )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TASI Symbol Filter
+# فلتر رموز تاسي (السوق الرئيسي فقط)
+# القاعدة: طول الرمز = 4 أرقام AND يبدأ بـ [1-8]
+# مستبعد: أسهم نمو وETFs التي تبدأ بـ 9 (مثال: 9401, 9510, 9520)
+# مستبعد أيضاً: رموز القطاعات 900xx (5 أرقام، تبدأ بـ 9)
+# ─────────────────────────────────────────────────────────────────────────────
+_TASI_SYMBOL_RE = re.compile(r'^[1-8][0-9]{3}$')
+
+
+def is_tasi_symbol(symbol: str) -> bool:
+    """
+    Returns True only for TASI main-market stock symbols.
+    Rule: exactly 4 digits AND starts with 1-8.
+    Excludes: Nomu (نمو) and ETFs starting with 9 (e.g. 9401, 9510, 9520).
+    Excludes: Sector/index symbols 900xx (5-digit, start with 9).
+
+    Examples:
+        is_tasi_symbol('2222')  → True
+        is_tasi_symbol('1120')  → True
+        is_tasi_symbol('8010')  → True
+        is_tasi_symbol('9401')  → False  (Nomu/ETF)
+        is_tasi_symbol('9510')  → False  (ETF)
+        is_tasi_symbol('90001') → False  (sector index)
+    """
+    return bool(_TASI_SYMBOL_RE.match(str(symbol)))
 
 
 class SahmkAPIError(Exception):
@@ -431,7 +460,13 @@ class SahmkClient:
     ]
 
     def get_symbols_list(self) -> List[str]:
-        """Fetch list of all TASI symbols including sectors and TASI index"""
+        """Fetch list of TASI main-market symbols + sector/index symbols.
+
+        فلتر الرموز:
+        - أسهم تاسي: regex ^[1-8][0-9]{3}$ (طول 4 أرقام، يبدأ بـ 1-8)
+        - مستبعد: أسهم نمو وETFs التي تبدأ بـ 9 (مثال: 9401, 9510, 9520)
+        - مُضاف دائماً: رموز القطاعات والمؤشر العام 900xx
+        """
         try:
             self.logger.info("📋 Fetching TASI symbols list (stocks + sectors + index)")
 
@@ -443,39 +478,68 @@ class SahmkClient:
                         cached.append(s)
                 return cached
 
-            # --- تغيير فلسفة الجمع: جلب كل الرموز مباشرة ---
-            # بدلاً من الاعتماد على قوائم الرابحين/الخاسرين، نستخدم endpoint يجلب كل رموز السوق
+            # --- جلب كل الرموز من API ---
             all_symbols_data = self._make_request('GET', 'market/symbols/')
 
-            # --- معالجة القائمة الجديدة ---
-            symbols = []
+            # --- تطبيق فلتر تاسي القوي ---
+            raw_symbols = []
             if isinstance(all_symbols_data, list):
                 for item in all_symbols_data:
-                    sym = str(item.get('symbol', ''))
-                    if sym and sym not in symbols:
-                        symbols.append(sym)
+                    sym = str(item.get('symbol', '')).strip()
+                    if sym:
+                        raw_symbols.append(sym)
 
+            # ── الفلتر القوي: فقط رموز تاسي الرئيسي ^[1-8][0-9]{3}$ ──
+            tasi_symbols = []
+            excluded_9xx  = []
+            excluded_other = []
 
+            for sym in raw_symbols:
+                if is_tasi_symbol(sym):
+                    if sym not in tasi_symbols:
+                        tasi_symbols.append(sym)
+                elif sym.startswith('9') and len(sym) == 4:
+                    # أسهم نمو أو ETFs (4 أرقام تبدأ بـ 9)
+                    excluded_9xx.append(sym)
+                elif not is_sector_symbol(sym):
+                    # رموز أخرى غير معروفة (ليست قطاعات)
+                    excluded_other.append(sym)
 
+            # ── Logging واضح ──
+            self.logger.info(
+                f"🔍 TASI symbols filtered: {len(tasi_symbols)} symbols "
+                f"(Nomu and ETFs starting with 9 excluded)"
+            )
+            if excluded_9xx:
+                self.logger.info(
+                    f"🚫 Excluded {len(excluded_9xx)} symbols starting with 9 "
+                    f"(Nomu/ETFs): {sorted(excluded_9xx)[:10]}"
+                    f"{'...' if len(excluded_9xx) > 10 else ''}"
+                )
+            if excluded_other:
+                self.logger.debug(
+                    f"⚠️  Excluded {len(excluded_other)} other non-TASI symbols: "
+                    f"{excluded_other[:5]}"
+                )
 
             # ── إضافة القطاعات والمؤشر العام دائماً ──
+            symbols = tasi_symbols.copy()
             for sector_sym in self.SECTOR_SYMBOLS:
                 if sector_sym not in symbols:
                     symbols.append(sector_sym)
 
             if symbols:
                 redis_manager.set('sahmk:symbols_list', symbols, ttl=3600)
-                stock_count  = len(symbols) - len(self.SECTOR_SYMBOLS)
                 self.logger.success(
                     f"✅ Symbols list ready: {len(symbols)} total "
-                    f"({stock_count} stocks + {len(self.SECTOR_SYMBOLS)} sectors/index)"
+                    f"({len(tasi_symbols)} TASI stocks + {len(self.SECTOR_SYMBOLS)} sectors/index)"
                 )
 
             return symbols
 
         except Exception as e:
             self.logger.error(f"❌ Error fetching symbols list: {e}")
-            # fallback يشمل القطاعات والمؤشر
+            # fallback: رموز تاسي الأساسية فقط (بدون 9xx)
             return [
                 "2222", "1120", "2010", "2350", "4200",
                 "1180", "2380", "3020", "1010", "4030"

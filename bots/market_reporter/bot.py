@@ -31,7 +31,7 @@ from loguru import logger
 
 from config.config_manager import config
 from scripts.redis_manager import redis_manager
-from scripts.sahmk_client import SahmkClient, get_sahmk_client
+from scripts.sahmk_client import SahmkClient, get_sahmk_client, is_tasi_symbol
 from scripts.utils import get_saudi_time, is_trading_hours
 from scripts.sector_calculator import (
     compute_sector_candles_from_db,
@@ -192,9 +192,22 @@ class MarketReporter:
 
         للقطاعات (900xx): source = 'db_sector_calculator'
         للأسهم العادية:   source = 'sahmk_websocket'
+
+        فلتر الحفظ:
+        - يُسمح فقط بـ: أسهم تاسي ^[1-8][0-9]{3}$ أو رموز قطاعات 900xx
+        - مستبعد: أي رمز يبدأ بـ 9 وطوله 4 أرقام (نمو/ETFs)
         """
         if DB_POOL is None:
             self.logger.warning("DB pool not available, skipping candle save.")
+            return
+
+        # ── فلتر الحفظ: استبعاد رموز 9xx (نمو/ETFs) ──
+        symbol = candle.get('symbol', '')
+        if not is_tasi_symbol(symbol) and not is_sector_symbol(symbol):
+            self.logger.warning(
+                f"🚫 SAVE BLOCKED: symbol '{symbol}' is not a valid TASI or sector symbol "
+                f"(starts with 9 or invalid format) — skipping DB save"
+            )
             return
 
         # Ensure timezone-aware timestamp
@@ -551,26 +564,52 @@ class MarketReporter:
     async def get_filtered_symbols_for_analysis(
         self, all_symbols: List[str]
     ) -> List[str]:
-        """Applies a very light filter to exclude dead stocks, then returns all symbols."""
+        """Applies a very light filter to exclude dead stocks, then returns all symbols.
+
+        فلتر الرموز (مرحلة أولى):
+        - يستبعد جميع رموز 9xx (4 أرقام تبدأ بـ 9) — نمو/ETFs
+        - يبقي فقط: أسهم تاسي ^[1-8][0-9]{3}$ + رموز القطاعات 900xx
+        """
         # redis_manager.get is SYNC — no await
         cached = redis_manager.get('filtered_symbols:ready')
         if cached:
             return cached
 
-        self.logger.info(f"🔍 Filtering {len(all_symbols)} symbols...")
+        # ── الفلتر الأول: استبعاد رموز 9xx (نمو/ETFs) قبل أي شيء ──
+        excluded_9xx = [
+            s for s in all_symbols
+            if s.startswith('9') and len(s) == 4
+        ]
+        tasi_only = [
+            s for s in all_symbols
+            if is_tasi_symbol(s) or is_sector_symbol(s)
+        ]
+
+        if excluded_9xx:
+            self.logger.info(
+                f"🚫 Excluded {len(excluded_9xx)} symbols starting with 9 "
+                f"(Nomu/ETFs) from analysis: {sorted(excluded_9xx)[:10]}"
+                f"{'...' if len(excluded_9xx) > 10 else ''}"
+            )
+        self.logger.info(
+            f"🔍 TASI symbols filtered: {len(tasi_only)} symbols "
+            f"(Nomu and ETFs starting with 9 excluded)"
+        )
+        self.logger.info(f"🔍 Filtering {len(tasi_only)} TASI+sector symbols (after 9xx exclusion)...")
 
         # Fetch all data in parallel from DB
         semaphore = asyncio.Semaphore(FETCH_CONCURRENCY)
         fetch_tasks = [
             self._fetch_ohlcv_for_filter_safe(sym, semaphore)
-            for sym in all_symbols if sym not in SECTOR_NAMES # لا تحاول جلب بيانات تاريخية للقطاعات
+            for sym in tasi_only if sym not in SECTOR_NAMES  # لا تحاول جلب بيانات تاريخية للقطاعات
         ]
         data_frames = await asyncio.gather(*fetch_tasks)
 
-        # --- الفلترة الجديدة: فقط استبعاد الأسهم ذات حجم تداول صفر لمدة 10 أيام ---
+        # --- الفلترة الخفيفة: فقط استبعاد الأسهم ذات حجم تداول صفر لمدة 30 يوماً ---
+        stock_syms = [s for s in tasi_only if s not in SECTOR_NAMES]
         filter_tasks = [
             self._apply_light_filter(sym, df)
-            for sym, df in zip(all_symbols, data_frames)
+            for sym, df in zip(stock_syms, data_frames)
             if df is not None and not df.empty
         ]
         filter_results = await asyncio.gather(*filter_tasks)
@@ -584,7 +623,8 @@ class MarketReporter:
                 passing_symbols.append(sector_sym)
 
         self.logger.success(
-            f"✅ Filtering complete: {len(passing_symbols)}/{len(all_symbols)} passed."
+            f"✅ Filtering complete: {len(passing_symbols)} symbols passed "
+            f"({len(excluded_9xx)} Nomu/ETF 9xx symbols excluded)."
         )
         # redis_manager.set is SYNC — no await
         redis_manager.set('filtered_symbols:ready', passing_symbols, ttl=300)
