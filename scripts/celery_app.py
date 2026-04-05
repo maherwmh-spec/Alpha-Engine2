@@ -187,10 +187,18 @@ logger.info("Celery application initialized")
 
 
 @app.task(bind=True)
-def debug_task(self):
-    """Debug task to test Celery"""
-    logger.info(f'Request: {self.request!r}')
-    return 'Debug task completed'
+def debug_task(self, *args, **kwargs):
+    """
+    Debug task to test Celery.
+    Accepts optional positional and keyword arguments for flexible testing.
+    Usage:
+        debug_task.apply_async()                        # no args
+        debug_task.apply_async(args=['Hello World'])    # with message
+        debug_task.apply_async(kwargs={'key': 'val'})   # with kwargs
+    """
+    msg = args[0] if args else kwargs.get('message', 'no message')
+    logger.info(f'Request: {self.request!r} | message={msg}')
+    return f'Debug task completed: {msg}'
 
 
 if __name__ == '__main__':
