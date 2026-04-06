@@ -225,7 +225,8 @@ class MarketReporter:
         )
         name = SECTOR_NAMES.get(symbol) or candle.get('name') or 'Unknown'
 
-        sql = """
+        # ── INSERT مع fallback: جرّب مع source أولاً، ثم بدونه ──────────────
+        sql_with_source = """
         INSERT INTO market_data.ohlcv
             (time, symbol, timeframe, name, open, high, low, close,
              volume, open_interest, source)
@@ -239,22 +240,54 @@ class MarketReporter:
             open_interest = EXCLUDED.open_interest,
             source        = EXCLUDED.source;
         """
+        sql_without_source = """
+        INSERT INTO market_data.ohlcv
+            (time, symbol, timeframe, name, open, high, low, close,
+             volume, open_interest)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        ON CONFLICT (time, symbol, timeframe) DO UPDATE SET
+            open          = EXCLUDED.open,
+            high          = EXCLUDED.high,
+            low           = EXCLUDED.low,
+            close         = EXCLUDED.close,
+            volume        = EXCLUDED.volume,
+            open_interest = EXCLUDED.open_interest;
+        """
+        args_base = (
+            ts,
+            symbol,
+            '1m',
+            name,
+            float(candle['open']),
+            float(candle['high']),
+            float(candle['low']),
+            float(candle['close']),
+            int(float(candle['volume'])),
+            0,
+        )
         try:
             async with DB_POOL.acquire() as conn:
-                await conn.execute(
-                    sql,
-                    ts,                        # $1  time (timestamptz)
-                    symbol,                    # $2  symbol
-                    '1m',                      # $3  timeframe
-                    name,                      # $4  name
-                    float(candle['open']),     # $5  open
-                    float(candle['high']),     # $6  high
-                    float(candle['low']),      # $7  low
-                    float(candle['close']),    # $8  close
-                    int(float(candle['volume'])),  # $9  volume (bigint)
-                    0,                         # $10 open_interest
-                    source,                    # $11 source
-                )
+                try:
+                    await conn.execute(sql_with_source, *args_base, source)
+                    self.logger.debug(
+                        f"✅ Saved 1m candle: {symbol} @ {ts} | "
+                        f"close={candle['close']} vol={candle['volume']}"
+                    )
+                except Exception as e_src:
+                    # إذا فشل بسبب عمود source غير موجود → جرّب بدونه
+                    err_str = str(e_src).lower()
+                    if 'source' in err_str or 'column' in err_str:
+                        self.logger.warning(
+                            f"⚠️ 'source' column missing in ohlcv — "
+                            f"falling back to INSERT without source. "
+                            f"Run: psql -f migrations/003_fix_ohlcv_schema.sql"
+                        )
+                        await conn.execute(sql_without_source, *args_base)
+                        self.logger.debug(
+                            f"✅ Saved 1m candle (no-source): {symbol} @ {ts}"
+                        )
+                    else:
+                        raise
         except Exception as e:
             self.logger.error(f"❌ DB save error for {candle['symbol']}: {e}")
 
@@ -304,7 +337,7 @@ class MarketReporter:
 
         records = [tuple(row) for row in df_copy.itertuples(index=False, name=None)]
 
-        sql_upsert = """
+        sql_upsert_with_source = """
         INSERT INTO market_data.ohlcv
             (time, symbol, timeframe, name, open, high, low, close,
              volume, open_interest, source)
@@ -318,12 +351,41 @@ class MarketReporter:
             open_interest = EXCLUDED.open_interest,
             source        = EXCLUDED.source;
         """
+        sql_upsert_no_source = """
+        INSERT INTO market_data.ohlcv
+            (time, symbol, timeframe, name, open, high, low, close,
+             volume, open_interest)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        ON CONFLICT (time, symbol, timeframe) DO UPDATE SET
+            open          = EXCLUDED.open,
+            high          = EXCLUDED.high,
+            low           = EXCLUDED.low,
+            close         = EXCLUDED.close,
+            volume        = EXCLUDED.volume,
+            open_interest = EXCLUDED.open_interest;
+        """
+        # records_no_source: إزالة عمود source (آخر عمود)
+        records_no_source = [r[:10] for r in records]
         try:
             async with DB_POOL.acquire() as conn:
-                await conn.executemany(sql_upsert, records)
-            self.logger.debug(
-                f"💾 Saved {len(records)} historical candles [{symbol} {timeframe}]"
-            )
+                try:
+                    await conn.executemany(sql_upsert_with_source, records)
+                    self.logger.debug(
+                        f"💾 Saved {len(records)} historical candles [{symbol} {timeframe}]"
+                    )
+                except Exception as e_src:
+                    err_str = str(e_src).lower()
+                    if 'source' in err_str or 'column' in err_str:
+                        self.logger.warning(
+                            f"⚠️ 'source' column missing — saving {symbol} without source. "
+                            f"Run: psql -f migrations/003_fix_ohlcv_schema.sql"
+                        )
+                        await conn.executemany(sql_upsert_no_source, records_no_source)
+                        self.logger.debug(
+                            f"💾 Saved {len(records)} historical candles (no-source) [{symbol} {timeframe}]"
+                        )
+                    else:
+                        raise
         except Exception as e:
             self.logger.error(f"❌ Historical DB save error for {symbol}: {e}")
 
