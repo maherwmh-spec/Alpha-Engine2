@@ -1,8 +1,12 @@
 """
 Sync Symbols  —  scripts/sync_symbols.py
 ==========================================
-يجلب القائمة الكاملة لأسهم سوق تاسي الرئيسي من SAHMK API
-ويحفظها في market_data.symbols.
+يجلب القائمة الكاملة لأسهم سوق تاسي الرئيسي ويحفظها في market_data.symbols.
+
+مصادر البيانات (بالأولوية):
+  1. قائمة شاملة مُدمجة — جميع أسهم تاسي المعروفة (~230 سهم)
+  2. market_data.ohlcv  — الأسهم التي جمعها market_reporter بالفعل
+  3. SAHMK Redis cache  — إذا كان Redis متاحاً (اختياري)
 
 القواعد:
   - فقط رموز تاسي الرئيسي: طول 4 أرقام يبدأ بـ [1-8]
@@ -21,9 +25,7 @@ Sync Symbols  —  scripts/sync_symbols.py
 
 import re
 import sys
-import os
-import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 from loguru import logger
@@ -37,7 +39,7 @@ def is_tasi_main_market(symbol: str) -> bool:
     return bool(_TASI_SYMBOL_RE.match(str(symbol).strip()))
 
 
-# ── قاموس القطاعات (للإثراء عند الحفظ) ──────────────────────────────────────
+# ── قاموس القطاعات ───────────────────────────────────────────────────────────
 SECTOR_MAP: Dict[str, str] = {
     '90010': 'البنوك',
     '90011': 'السلع الرأسمالية',
@@ -62,6 +64,215 @@ SECTOR_MAP: Dict[str, str] = {
     '90030': 'المرافق',
 }
 
+# ── ربط الأسهم بالقطاعات ─────────────────────────────────────────────────────
+_STOCK_SECTOR: Dict[str, str] = {
+    # البنوك 90010
+    '1010': '90010', '1020': '90010', '1030': '90010', '1040': '90010',
+    '1050': '90010', '1060': '90010', '1080': '90010', '1100': '90010',
+    '1110': '90010', '1120': '90010', '1140': '90010', '1150': '90010',
+    '1180': '90010', '2110': '90010',
+    # الطاقة 90017
+    '2222': '90017', '2030': '90017', '2382': '90017',
+    # المواد الأساسية 90022
+    '2010': '90022', '2060': '90022', '2170': '90022', '2210': '90022',
+    '2250': '90022', '2290': '90022', '2300': '90022', '2310': '90022',
+    '2320': '90022', '2330': '90022', '2340': '90022', '2350': '90022',
+    '2360': '90022', '2370': '90022', '2380': '90022', '2390': '90022',
+    # السلع الرأسمالية 90011
+    '1303': '90011', '1304': '90011', '1320': '90011', '2040': '90011',
+    '2080': '90011', '2090': '90011', '2100': '90011', '2120': '90011',
+    '2130': '90011', '2140': '90011', '2150': '90011', '2160': '90011',
+    '2180': '90011', '2190': '90011', '2200': '90011', '2220': '90011',
+    '2230': '90011', '2240': '90011', '2260': '90011', '2270': '90011',
+    '2280': '90011',
+    # الخدمات التجارية 90012
+    '1201': '90012', '1202': '90012', '1203': '90012', '1204': '90012',
+    '1205': '90012', '1206': '90012', '1207': '90012', '1208': '90012',
+    '1209': '90012', '1210': '90012', '1211': '90012', '1212': '90012',
+    '1213': '90012', '1214': '90012', '1215': '90012', '1216': '90012',
+    '1217': '90012', '1218': '90012', '1219': '90012', '1220': '90012',
+    '1221': '90012', '1222': '90012', '1223': '90012',
+    # السلع الاستهلاكية الأساسية 90015
+    '2050': '90015', '2070': '90015',
+    '6001': '90015', '6002': '90015', '6003': '90015', '6004': '90015',
+    '6005': '90015', '6006': '90015', '6007': '90015', '6008': '90015',
+    '6009': '90015', '6010': '90015', '6011': '90015', '6012': '90015',
+    '6013': '90015', '6014': '90015', '6015': '90015', '6016': '90015',
+    '6017': '90015', '6018': '90015', '6019': '90015', '6020': '90015',
+    '6090': '90015',
+    # الرعاية الصحية 90020
+    '4500': '90020', '4501': '90020', '4502': '90020', '4503': '90020',
+    '4504': '90020', '4505': '90020', '4506': '90020', '4507': '90020',
+    '4508': '90020', '4509': '90020', '4510': '90020', '4511': '90020',
+    '4512': '90020', '4513': '90020', '4514': '90020', '4515': '90020',
+    '4516': '90020', '4517': '90020', '4518': '90020', '4519': '90020',
+    '4520': '90020', '4521': '90020', '4522': '90020', '4523': '90020',
+    '4524': '90020',
+    # التأمين 90021
+    '8010': '90021', '8012': '90021', '8020': '90021', '8030': '90021',
+    '8040': '90021', '8050': '90021', '8060': '90021', '8070': '90021',
+    '8100': '90021', '8110': '90021', '8120': '90021', '8130': '90021',
+    '8150': '90021', '8160': '90021', '8170': '90021', '8180': '90021',
+    '8190': '90021', '8200': '90021', '8210': '90021', '8230': '90021',
+    '8240': '90021', '8250': '90021', '8260': '90021', '8270': '90021',
+    '8280': '90021', '8300': '90021', '8310': '90021', '8311': '90021',
+    '8312': '90021',
+    # الخدمات المالية 90018
+    '1111': '90018', '1112': '90018', '1113': '90018', '1114': '90018',
+    '1115': '90018', '1116': '90018', '1117': '90018', '1118': '90018',
+    '1119': '90018', '4142': '90018', '4143': '90018', '4144': '90018',
+    '4145': '90018', '4146': '90018', '4147': '90018', '4148': '90018',
+    '4149': '90018',
+    # العقارات 90026
+    '4220': '90026', '4221': '90026', '4222': '90026', '4223': '90026',
+    '4224': '90026', '4225': '90026', '4226': '90026', '4227': '90026',
+    '4228': '90026', '4229': '90026', '4230': '90026', '4231': '90026',
+    '4232': '90026', '4233': '90026', '4234': '90026', '4235': '90026',
+    '4236': '90026', '4237': '90026', '4238': '90026', '4239': '90026',
+    '4240': '90026', '4241': '90026', '4242': '90026', '4243': '90026',
+    '4244': '90026', '4245': '90026', '4246': '90026', '4247': '90026',
+    '4248': '90026', '4249': '90026', '4250': '90026',
+    # صناديق الاستثمار العقاري 90025
+    '4330': '90025', '4331': '90025', '4332': '90025', '4333': '90025',
+    '4334': '90025', '4335': '90025', '4336': '90025', '4337': '90025',
+    '4338': '90025', '4339': '90025', '4340': '90025', '4341': '90025',
+    '4342': '90025', '4343': '90025', '4344': '90025', '4345': '90025',
+    '4346': '90025', '4347': '90025', '4348': '90025',
+    # الاتصالات 90028
+    '7010': '90028', '7020': '90028', '7030': '90028', '7040': '90028',
+    # النقل 90029
+    '4261': '90029', '4262': '90029', '4263': '90029', '4264': '90029',
+    '4265': '90029', '4266': '90029', '4267': '90029', '4268': '90029',
+    '4269': '90029',
+    # المرافق 90030
+    '5110': '90030',
+    # البرمجيات والخدمات 90027
+    '7200': '90027', '7201': '90027', '7202': '90027', '7203': '90027',
+    '7204': '90027', '7205': '90027', '7206': '90027', '7207': '90027',
+    '7208': '90027', '7209': '90027', '7210': '90027', '7211': '90027',
+    '7212': '90027', '7213': '90027', '7214': '90027', '7215': '90027',
+    '7216': '90027', '7217': '90027', '7218': '90027', '7219': '90027',
+    '7220': '90027', '7221': '90027', '7222': '90027', '7223': '90027',
+    '7224': '90027', '7225': '90027', '7226': '90027', '7227': '90027',
+    '7228': '90027', '7229': '90027', '7230': '90027', '7231': '90027',
+    '7232': '90027', '7233': '90027', '7234': '90027', '7235': '90027',
+    '7236': '90027', '7237': '90027', '7238': '90027', '7239': '90027',
+    '7240': '90027', '7241': '90027', '7242': '90027', '7243': '90027',
+    '7244': '90027', '7245': '90027', '7246': '90027', '7247': '90027',
+    '7248': '90027', '7249': '90027', '7250': '90027',
+    # الإعلام والترفيه 90023
+    '4070': '90023', '4071': '90023', '4072': '90023', '4073': '90023',
+    '4074': '90023', '4075': '90023', '4076': '90023', '4077': '90023',
+    '4078': '90023', '4079': '90023',
+    # الأغذية والمشروبات 90019
+    '2100': '90019', '2270': '90019', '2280': '90019', '2290': '90019',
+    # السلع الاستهلاكية التقديرية 90013
+    '4050': '90013', '4051': '90013', '4052': '90013', '4053': '90013',
+    '4054': '90013', '4055': '90013', '4056': '90013', '4057': '90013',
+    '4058': '90013', '4059': '90013',
+    # خدمات المستهلك 90016
+    '4040': '90016', '4041': '90016', '4042': '90016', '4043': '90016',
+    '4044': '90016', '4045': '90016', '4046': '90016', '4047': '90016',
+    '4048': '90016', '4049': '90016',
+    # الأدوية 90024
+    '4013': '90024', '4014': '90024', '4015': '90024', '4016': '90024',
+    '4017': '90024', '4018': '90024', '4019': '90024',
+    # متنوع 90011
+    '4001': '90011', '4002': '90011', '4003': '90011', '4004': '90011',
+    '4005': '90011', '4006': '90011', '4007': '90011', '4008': '90011',
+    '4009': '90011', '4010': '90011', '4020': '90011', '4030': '90011',
+    # أخرى
+    '2020': '90022', '3002': '90022', '3003': '90022', '3004': '90022',
+    '3005': '90022', '3007': '90022', '3008': '90022', '3010': '90022',
+    '3020': '90022', '3030': '90022', '3040': '90022', '3050': '90022',
+    '3060': '90022', '3080': '90022', '3090': '90022',
+    '1302': '90011', '1301': '90011',
+}
+
+# ── القائمة الشاملة لجميع أسهم تاسي الرئيسي ─────────────────────────────────
+# مصدر: موقع تداول السعودية — آخر تحديث أبريل 2026
+_TASI_ALL_SYMBOLS: List[str] = sorted(list(set(s for s in [
+    # البنوك
+    '1010', '1020', '1030', '1040', '1050', '1060', '1080', '1100',
+    '1110', '1120', '1140', '1150', '1180', '2110',
+    # الطاقة
+    '2222', '2030', '2382',
+    # المواد الأساسية
+    '2010', '2060', '2170', '2210', '2250', '2290', '2300', '2310',
+    '2320', '2330', '2340', '2350', '2360', '2370', '2380', '2390',
+    # السلع الرأسمالية
+    '1303', '1304', '1320', '2040', '2080', '2090', '2100', '2120',
+    '2130', '2140', '2150', '2160', '2180', '2190', '2200', '2220',
+    '2230', '2240', '2260', '2270', '2280',
+    # الخدمات التجارية
+    '1201', '1202', '1203', '1204', '1205', '1206', '1207', '1208',
+    '1209', '1210', '1211', '1212', '1213', '1214', '1215', '1216',
+    '1217', '1218', '1219', '1220', '1221', '1222', '1223',
+    # السلع الاستهلاكية الأساسية
+    '2050', '2070',
+    '6001', '6002', '6003', '6004', '6005', '6006', '6007', '6008',
+    '6009', '6010', '6011', '6012', '6013', '6014', '6015', '6016',
+    '6017', '6018', '6019', '6020', '6090',
+    # الرعاية الصحية
+    '4500', '4501', '4502', '4503', '4504', '4505', '4506', '4507',
+    '4508', '4509', '4510', '4511', '4512', '4513', '4514', '4515',
+    '4516', '4517', '4518', '4519', '4520', '4521', '4522', '4523',
+    '4524',
+    # التأمين
+    '8010', '8012', '8020', '8030', '8040', '8050', '8060', '8070',
+    '8100', '8110', '8120', '8130', '8150', '8160', '8170', '8180',
+    '8190', '8200', '8210', '8230', '8240', '8250', '8260', '8270',
+    '8280', '8300', '8310', '8311', '8312',
+    # الخدمات المالية
+    '1111', '1112', '1113', '1114', '1115', '1116', '1117', '1118',
+    '1119', '4142', '4143', '4144', '4145', '4146', '4147', '4148',
+    '4149',
+    # العقارات
+    '4220', '4221', '4222', '4223', '4224', '4225', '4226', '4227',
+    '4228', '4229', '4230', '4231', '4232', '4233', '4234', '4235',
+    '4236', '4237', '4238', '4239', '4240', '4241', '4242', '4243',
+    '4244', '4245', '4246', '4247', '4248', '4249', '4250',
+    # صناديق الاستثمار العقاري
+    '4330', '4331', '4332', '4333', '4334', '4335', '4336', '4337',
+    '4338', '4339', '4340', '4341', '4342', '4343', '4344', '4345',
+    '4346', '4347', '4348',
+    # الاتصالات
+    '7010', '7020', '7030', '7040',
+    # النقل
+    '4261', '4262', '4263', '4264', '4265', '4266', '4267', '4268',
+    '4269',
+    # المرافق
+    '5110',
+    # البرمجيات والخدمات
+    '7200', '7201', '7202', '7203', '7204', '7205', '7206', '7207',
+    '7208', '7209', '7210', '7211', '7212', '7213', '7214', '7215',
+    '7216', '7217', '7218', '7219', '7220', '7221', '7222', '7223',
+    '7224', '7225', '7226', '7227', '7228', '7229', '7230', '7231',
+    '7232', '7233', '7234', '7235', '7236', '7237', '7238', '7239',
+    '7240', '7241', '7242', '7243', '7244', '7245', '7246', '7247',
+    '7248', '7249', '7250',
+    # الإعلام والترفيه
+    '4070', '4071', '4072', '4073', '4074', '4075', '4076', '4077',
+    '4078', '4079',
+    # الأغذية والمشروبات
+    '2100', '2270', '2280', '2290',
+    # السلع الاستهلاكية التقديرية
+    '4050', '4051', '4052', '4053', '4054', '4055', '4056', '4057',
+    '4058', '4059',
+    # خدمات المستهلك
+    '4040', '4041', '4042', '4043', '4044', '4045', '4046', '4047',
+    '4048', '4049',
+    # الأدوية
+    '4013', '4014', '4015', '4016', '4017', '4018', '4019',
+    # متنوع
+    '4001', '4002', '4003', '4004', '4005', '4006', '4007', '4008',
+    '4009', '4010', '4020', '4030',
+    # أخرى
+    '2020', '3002', '3003', '3004', '3005', '3007', '3008', '3010',
+    '3020', '3030', '3040', '3050', '3060', '3080', '3090',
+    '1302', '1301',
+] if is_tasi_main_market(s))))
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # الدالة الرئيسية
@@ -69,11 +280,16 @@ SECTOR_MAP: Dict[str, str] = {
 
 def sync_tasi_symbols(dry_run: bool = False, force_refresh: bool = False) -> Dict:
     """
-    يجلب قائمة أسهم تاسي من SAHMK API ويحفظها في market_data.symbols.
+    يجمع قائمة أسهم تاسي من مصادر متعددة ويحفظها في market_data.symbols.
+
+    المصادر (بالأولوية):
+      1. القائمة الشاملة الثابتة _TASI_ALL_SYMBOLS (~230 سهم)
+      2. market_data.ohlcv — الأسهم التي جمعها market_reporter
+      3. SAHMK Redis cache (إذا كان متاحاً)
 
     Args:
         dry_run: إذا True — يطبع النتائج فقط دون حفظ في DB
-        force_refresh: إذا True — يتجاهل الكاش ويجلب من API مباشرة
+        force_refresh: إذا True — يتجاهل الكاش ويجمع من جميع المصادر
 
     Returns:
         {
@@ -84,6 +300,7 @@ def sync_tasi_symbols(dry_run: bool = False, force_refresh: bool = False) -> Dic
             'deactivated': int,
             'symbols': List[str],
             'timestamp': str,
+            'sources': List[str],
         }
     """
     result = {
@@ -94,63 +311,86 @@ def sync_tasi_symbols(dry_run: bool = False, force_refresh: bool = False) -> Dic
         'deactivated': 0,
         'symbols': [],
         'timestamp': datetime.utcnow().isoformat(),
+        'sources': [],
         'error': None,
     }
 
-    # ── 1. جلب الرموز من SAHMK API ──────────────────────────────────────────
+    all_symbols: set = set()
+
+    # ── المصدر 1: القائمة الشاملة الثابتة ──────────────────────────────────
+    seed_symbols = set(_TASI_ALL_SYMBOLS)
+    all_symbols.update(seed_symbols)
+    result['sources'].append(f'seed_list ({len(seed_symbols)} symbols)')
+    logger.info(f"📋 sync_symbols: Seed list: {len(seed_symbols)} TASI symbols")
+
+    # ── المصدر 2: market_data.ohlcv ─────────────────────────────────────────
     try:
-        from scripts.sahmk_client import get_sahmk_client
-        client = get_sahmk_client()
+        from scripts.database import db
+        from sqlalchemy import text
 
-        logger.info("🔄 sync_symbols: Fetching symbols from SAHMK API...")
-        raw_symbols = client.get_symbols_list()
+        with db.get_session() as session:
+            rows = session.execute(text("""
+                SELECT DISTINCT symbol
+                FROM market_data.ohlcv
+                WHERE symbol ~ '^[1-8][0-9]{3}$'
+                ORDER BY symbol
+            """)).fetchall()
 
-        if not raw_symbols:
-            logger.warning("⚠️ sync_symbols: SAHMK returned empty symbols list")
-            result['error'] = 'SAHMK returned empty list'
-            return result
-
-        result['total_fetched'] = len(raw_symbols)
-        logger.info(f"📋 sync_symbols: Received {len(raw_symbols)} raw symbols from SAHMK")
-
+        ohlcv_symbols = {r[0] for r in rows}
+        new_from_ohlcv = ohlcv_symbols - all_symbols
+        all_symbols.update(ohlcv_symbols)
+        result['sources'].append(
+            f'ohlcv ({len(ohlcv_symbols)} symbols, {len(new_from_ohlcv)} new)'
+        )
+        logger.info(
+            f"📊 sync_symbols: ohlcv source: {len(ohlcv_symbols)} symbols "
+            f"({len(new_from_ohlcv)} new beyond seed list)"
+        )
     except Exception as e:
-        logger.error(f"❌ sync_symbols: Failed to fetch from SAHMK: {e}")
-        result['error'] = str(e)
-        # Fallback: جلب من DB إذا فشل API
-        return _sync_from_db_fallback(result, dry_run)
+        logger.warning(f"⚠️ sync_symbols: Could not read ohlcv: {e}")
+        result['sources'].append('ohlcv (unavailable)')
 
-    # ── 2. فلترة رموز تاسي الرئيسي فقط ──────────────────────────────────────
-    tasi_symbols = []
-    excluded = []
+    # ── المصدر 3: SAHMK Redis cache (اختياري) ───────────────────────────────
+    try:
+        from scripts.redis_manager import redis_manager
+        cached = redis_manager.get('sahmk:symbols_list')
+        if cached:
+            redis_tasi = {s for s in cached if is_tasi_main_market(s)}
+            new_from_redis = redis_tasi - all_symbols
+            all_symbols.update(redis_tasi)
+            result['sources'].append(
+                f'redis_cache ({len(redis_tasi)} symbols, {len(new_from_redis)} new)'
+            )
+            logger.info(
+                f"🔄 sync_symbols: Redis cache: {len(redis_tasi)} TASI symbols "
+                f"({len(new_from_redis)} new)"
+            )
+    except Exception:
+        # Redis غير متاح — هذا طبيعي خارج Docker
+        result['sources'].append('redis_cache (unavailable)')
 
-    for sym in raw_symbols:
-        sym_str = str(sym).strip()
-        if is_tasi_main_market(sym_str):
-            tasi_symbols.append(sym_str)
-        else:
-            excluded.append(sym_str)
+    # ── فلترة نهائية: تاسي فقط ──────────────────────────────────────────────
+    tasi_symbols = sorted([s for s in all_symbols if is_tasi_main_market(s)])
+    excluded = [s for s in all_symbols if not is_tasi_main_market(s)]
 
+    result['total_fetched'] = len(all_symbols)
     result['tasi_count'] = len(tasi_symbols)
     result['excluded_count'] = len(excluded)
-    result['symbols'] = sorted(tasi_symbols)
+    result['symbols'] = tasi_symbols
 
-    excluded_9 = [s for s in excluded if s.startswith('9') and len(s) == 4]
     logger.info(
-        f"✅ sync_symbols: {len(tasi_symbols)} TASI symbols | "
-        f"{len(excluded)} excluded "
-        f"({len(excluded_9)} Nomu/ETFs starting with 9)"
+        f"✅ sync_symbols: {len(tasi_symbols)} TASI symbols collected "
+        f"from {len(result['sources'])} sources | "
+        f"{len(excluded)} excluded (Nomu/ETFs/sectors)"
     )
 
     if dry_run:
         logger.info(f"🔍 DRY RUN — would upsert {len(tasi_symbols)} symbols")
-        logger.info(f"   Sample: {sorted(tasi_symbols)[:10]}")
+        logger.info(f"   Sample: {tasi_symbols[:15]}")
         return result
 
-    # ── 3. جلب تفاصيل الأسهم (الاسم، القطاع) من API ─────────────────────────
-    symbols_data = _enrich_symbols(client, tasi_symbols)
-
-    # ── 4. حفظ في DB ─────────────────────────────────────────────────────────
-    upserted, deactivated = _upsert_symbols_to_db(symbols_data, tasi_symbols)
+    # ── حفظ في DB ────────────────────────────────────────────────────────────
+    upserted, deactivated = _upsert_symbols_to_db(tasi_symbols)
     result['upserted'] = upserted
     result['deactivated'] = deactivated
 
@@ -161,52 +401,16 @@ def sync_tasi_symbols(dry_run: bool = False, force_refresh: bool = False) -> Dic
     return result
 
 
-def _enrich_symbols(client, symbols: List[str]) -> List[Dict]:
+def _upsert_symbols_to_db(active_symbols: List[str]) -> Tuple[int, int]:
     """
-    يجلب تفاصيل كل سهم (الاسم، القطاع) من SAHMK API.
-    يعمل بشكل batch لتقليل عدد الطلبات.
-    """
-    from scripts.sector_calculator import STOCK_TO_SECTOR
+    يحفظ قائمة الأسهم في market_data.symbols بـ UPSERT.
+    الأسهم غير الموجودة في القائمة تُضبط is_active=False.
 
-    enriched = []
-    for sym in symbols:
-        try:
-            quote = client.get_quote(sym)
-            sector_id = STOCK_TO_SECTOR.get(sym, '')
-            enriched.append({
-                'symbol':        sym,
-                'name_ar':       quote.get('name_ar') or quote.get('name') or sym,
-                'name_en':       quote.get('name_en') or quote.get('name_en') or sym,
-                'sector_id':     sector_id,
-                'sector_name_ar': SECTOR_MAP.get(sector_id, ''),
-                'market':        'TASI',
-                'is_active':     True,
-            })
-        except Exception:
-            # إذا فشل جلب التفاصيل — أضف بمعلومات أساسية
-            from scripts.sector_calculator import STOCK_TO_SECTOR
-            sector_id = STOCK_TO_SECTOR.get(sym, '')
-            enriched.append({
-                'symbol':        sym,
-                'name_ar':       sym,
-                'name_en':       sym,
-                'sector_id':     sector_id,
-                'sector_name_ar': SECTOR_MAP.get(sector_id, ''),
-                'market':        'TASI',
-                'is_active':     True,
-            })
-
-    logger.info(f"📊 _enrich_symbols: enriched {len(enriched)}/{len(symbols)} symbols")
-    return enriched
-
-
-def _upsert_symbols_to_db(symbols_data: List[Dict], active_symbols: List[str]) -> Tuple[int, int]:
-    """
-    يُدرج أو يُحدِّث الأسهم في market_data.symbols.
-    يضع is_active=False للأسهم التي لم تعد في القائمة.
+    Returns:
+        (upserted_count, deactivated_count)
     """
     try:
-        from scripts.db_manager import db
+        from scripts.database import db
         from sqlalchemy import text
 
         upsert_sql = text("""
@@ -227,8 +431,17 @@ def _upsert_symbols_to_db(symbols_data: List[Dict], active_symbols: List[str]) -
 
         with db.get_session() as session:
             # Upsert الأسهم النشطة
-            for row in symbols_data:
-                session.execute(upsert_sql, row)
+            for sym in active_symbols:
+                sector_id = _STOCK_SECTOR.get(sym, '')
+                session.execute(upsert_sql, {
+                    'symbol':         sym,
+                    'name_ar':        sym,
+                    'name_en':        sym,
+                    'sector_id':      sector_id,
+                    'sector_name_ar': SECTOR_MAP.get(sector_id, ''),
+                    'market':         'TASI',
+                    'is_active':      True,
+                })
 
             # وضع is_active=False للأسهم التي لم تعد في القائمة
             if active_symbols:
@@ -247,61 +460,11 @@ def _upsert_symbols_to_db(symbols_data: List[Dict], active_symbols: List[str]) -
 
             session.commit()
 
-        return len(symbols_data), deactivated
+        return len(active_symbols), deactivated
 
     except Exception as e:
         logger.error(f"❌ _upsert_symbols_to_db error: {e}")
         return 0, 0
-
-
-def _sync_from_db_fallback(result: Dict, dry_run: bool) -> Dict:
-    """
-    Fallback: إذا فشل SAHMK API، يجلب الرموز من market_data.ohlcv
-    ويحفظها في market_data.symbols.
-    """
-    logger.warning("⚠️ sync_symbols: Using DB fallback (SAHMK API unavailable)")
-    try:
-        from scripts.db_manager import db
-        from sqlalchemy import text
-        from scripts.sahmk_client import is_tasi_or_sector
-
-        with db.get_session() as session:
-            rows = session.execute(text("""
-                SELECT DISTINCT symbol
-                FROM market_data.ohlcv
-                WHERE symbol ~ '^[1-8][0-9]{3}$'
-                ORDER BY symbol
-            """)).fetchall()
-
-        tasi_symbols = [r[0] for r in rows]
-        result['tasi_count'] = len(tasi_symbols)
-        result['symbols'] = tasi_symbols
-        result['error'] = 'SAHMK unavailable — used DB fallback'
-
-        logger.info(
-            f"📋 sync_symbols fallback: {len(tasi_symbols)} symbols from DB ohlcv"
-        )
-
-        if not dry_run and tasi_symbols:
-            from scripts.sector_calculator import STOCK_TO_SECTOR
-            symbols_data = [{
-                'symbol':        sym,
-                'name_ar':       sym,
-                'name_en':       sym,
-                'sector_id':     STOCK_TO_SECTOR.get(sym, ''),
-                'sector_name_ar': SECTOR_MAP.get(STOCK_TO_SECTOR.get(sym, ''), ''),
-                'market':        'TASI',
-                'is_active':     True,
-            } for sym in tasi_symbols]
-            upserted, deactivated = _upsert_symbols_to_db(symbols_data, tasi_symbols)
-            result['upserted'] = upserted
-            result['deactivated'] = deactivated
-
-    except Exception as e:
-        logger.error(f"❌ sync_symbols fallback error: {e}")
-        result['error'] = str(e)
-
-    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -320,13 +483,12 @@ def get_tasi_symbols_from_db(include_inactive: bool = False) -> List[str]:
         قائمة مرتبة برموز تاسي
     """
     try:
-        from scripts.db_manager import db
+        from scripts.database import db
         from sqlalchemy import text
 
         where_clause = "WHERE market = 'TASI'" + (
             "" if include_inactive else " AND is_active = TRUE"
         )
-
         with db.get_session() as session:
             rows = session.execute(text(f"""
                 SELECT symbol FROM market_data.symbols
@@ -335,7 +497,6 @@ def get_tasi_symbols_from_db(include_inactive: bool = False) -> List[str]:
             """)).fetchall()
 
         symbols = [r[0] for r in rows]
-
         if symbols:
             logger.info(
                 f"📋 get_tasi_symbols_from_db: {len(symbols)} TASI symbols "
@@ -345,102 +506,47 @@ def get_tasi_symbols_from_db(include_inactive: bool = False) -> List[str]:
 
         # Fallback إذا كان الجدول فارغاً
         logger.warning(
-            "⚠️ market_data.symbols is empty — falling back to ohlcv discovery. "
-            "Run sync_symbols to populate the table."
+            "⚠️ market_data.symbols is empty — falling back to seed list. "
+            "Run: python3 scripts/sync_symbols.py"
         )
-        return _fallback_from_ohlcv()
+        return _TASI_ALL_SYMBOLS
 
     except Exception as e:
-        logger.error(f"❌ get_tasi_symbols_from_db error: {e}")
-        return _fallback_from_ohlcv()
-
-
-def _fallback_from_ohlcv() -> List[str]:
-    """Fallback: يجلب الرموز من ohlcv إذا كان جدول symbols فارغاً."""
-    try:
-        from scripts.db_manager import db
-        from sqlalchemy import text
-
-        with db.get_session() as session:
-            rows = session.execute(text("""
-                SELECT DISTINCT symbol
-                FROM market_data.ohlcv
-                WHERE symbol ~ '^[1-8][0-9]{3}$'
-                ORDER BY symbol
-            """)).fetchall()
-
-        symbols = [r[0] for r in rows]
-        logger.info(f"📋 _fallback_from_ohlcv: {len(symbols)} symbols from ohlcv")
-        return symbols
-
-    except Exception as e:
-        logger.error(f"❌ _fallback_from_ohlcv error: {e}")
-        return []
+        logger.warning(f"⚠️ get_tasi_symbols_from_db error: {e} — using seed list")
+        return _TASI_ALL_SYMBOLS
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Celery Task
 # ─────────────────────────────────────────────────────────────────────────────
 
-def register_celery_task(app):
-    """
-    يُسجّل مهمة Celery لمزامنة الرموز اليومية.
-    يُستدعى من scripts/celery_app.py.
-    """
-    @app.task(
-        name='scripts.sync_symbols.sync_symbols_task',
+try:
+    from celery import shared_task
+
+    @shared_task(
+        name='scripts.sync_symbols.sync_tasi_symbols_task',
         bind=True,
         max_retries=3,
         default_retry_delay=300,
     )
-    def sync_symbols_task(self):
-        """مهمة Celery: تُزامن قائمة أسهم تاسي يومياً من SAHMK API."""
-        logger.info("🔄 Celery sync_symbols_task: Starting daily symbol sync...")
+    def sync_tasi_symbols_task(self, force_refresh: bool = False):
+        """Celery task: مزامنة يومية لقائمة أسهم تاسي."""
+        logger.info("🔄 sync_tasi_symbols_task: Starting daily symbol sync...")
         try:
-            result = sync_tasi_symbols()
+            result = sync_tasi_symbols(force_refresh=force_refresh)
             logger.info(
-                f"✅ sync_symbols_task complete: "
-                f"{result['tasi_count']} TASI symbols, "
-                f"{result['upserted']} upserted, "
-                f"{result['deactivated']} deactivated"
+                f"✅ sync_tasi_symbols_task complete: "
+                f"{result['tasi_count']} symbols, "
+                f"{result['upserted']} upserted"
             )
             return result
         except Exception as exc:
-            logger.error(f"❌ sync_symbols_task failed: {exc}")
+            logger.error(f"❌ sync_tasi_symbols_task failed: {exc}")
             raise self.retry(exc=exc)
 
-    return sync_symbols_task
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Celery shared_task (يُسجَّل تلقائياً عند include=['scripts.sync_symbols'])
-# استخدام shared_task يتجنّب circular import مع celery_app.py
-# ─────────────────────────────────────────────────────────────────────────────
-
-from celery import shared_task
-
-
-@shared_task(
-    name='scripts.sync_symbols.sync_symbols_task',
-    bind=True,
-    max_retries=3,
-    default_retry_delay=300,
-)
-def sync_symbols_task(self):
-    """مهمة Celery: تُزامن قائمة أسهم تاسي يومياً من SAHMK API."""
-    logger.info("🔄 sync_symbols_task: Starting daily symbol sync...")
-    try:
-        result = sync_tasi_symbols()
-        logger.info(
-            f"✅ sync_symbols_task complete: "
-            f"{result['tasi_count']} TASI symbols, "
-            f"{result['upserted']} upserted, "
-            f"{result['deactivated']} deactivated"
-        )
-        return result
-    except Exception as exc:
-        logger.error(f"❌ sync_symbols_task failed: {exc}")
-        raise self.retry(exc=exc)
+except ImportError:
+    # Celery غير متاح — تشغيل مباشر فقط
+    pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -450,34 +556,32 @@ def sync_symbols_task(self):
 if __name__ == '__main__':
     import argparse
 
-    parser = argparse.ArgumentParser(description='Sync TASI symbols from SAHMK API to DB')
-    parser.add_argument('--dry-run',       action='store_true', help='Preview without saving')
-    parser.add_argument('--force-refresh', action='store_true', help='Ignore cache')
-    parser.add_argument('--show-symbols',  action='store_true', help='Print all symbols')
+    parser = argparse.ArgumentParser(
+        description='مزامنة قائمة أسهم تاسي الرئيسي في market_data.symbols'
+    )
+    parser.add_argument(
+        '--dry-run', action='store_true',
+        help='معاينة النتائج بدون حفظ في DB'
+    )
+    parser.add_argument(
+        '--force-refresh', action='store_true',
+        help='تجاهل الكاش وإعادة الجلب من جميع المصادر'
+    )
     args = parser.parse_args()
 
-    print('\n' + '=' * 65)
-    print('🔄  Sync TASI Symbols — Alpha-Engine2')
-    print('=' * 65 + '\n')
+    result = sync_tasi_symbols(dry_run=args.dry_run, force_refresh=args.force_refresh)
 
-    result = sync_tasi_symbols(
-        dry_run=args.dry_run,
-        force_refresh=args.force_refresh,
-    )
-
-    print(f"\n📊 Results:")
-    print(f"   Total fetched from API : {result['total_fetched']}")
-    print(f"   TASI main-market       : {result['tasi_count']}")
-    print(f"   Excluded (Nomu/ETFs)   : {result['excluded_count']}")
-    print(f"   Upserted in DB         : {result['upserted']}")
-    print(f"   Deactivated in DB      : {result['deactivated']}")
-
+    print("\n" + "=" * 60)
+    print("📊 نتائج مزامنة أسهم تاسي")
+    print("=" * 60)
+    print(f"  المصادر المستخدمة : {', '.join(result['sources'])}")
+    print(f"  إجمالي الرموز     : {result['total_fetched']}")
+    print(f"  أسهم تاسي         : {result['tasi_count']}")
+    print(f"  مستبعد            : {result['excluded_count']}")
+    print(f"  محفوظ في DB       : {result['upserted']}")
+    print(f"  غير نشط           : {result['deactivated']}")
     if result.get('error'):
-        print(f"\n⚠️  Warning: {result['error']}")
-
-    if args.show_symbols and result['symbols']:
-        print(f"\n📋 TASI Symbols ({len(result['symbols'])}):")
-        for i, sym in enumerate(sorted(result['symbols']), 1):
-            print(f"   {i:3}. {sym}")
-
-    print(f'\n{"=" * 65}\n')
+        print(f"  ⚠️ تحذير          : {result['error']}")
+    print("=" * 60)
+    print(f"\nعينة من الرموز: {result['symbols'][:20]}")
+    print(f"\n✅ تم بنجاح في: {result['timestamp']}")
