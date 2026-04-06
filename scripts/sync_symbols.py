@@ -1,587 +1,357 @@
 """
-Sync Symbols  —  scripts/sync_symbols.py
-==========================================
-يجلب القائمة الكاملة لأسهم سوق تاسي الرئيسي ويحفظها في market_data.symbols.
+scripts/sync_symbols.py
+=======================
+مزامنة قائمة أسهم تاسي الرسمية من موقع أرقام (argaam.com).
 
-مصادر البيانات (بالأولوية):
-  1. قائمة شاملة مُدمجة — جميع أسهم تاسي المعروفة (~230 سهم)
-  2. market_data.ohlcv  — الأسهم التي جمعها market_reporter بالفعل
-  3. SAHMK Redis cache  — إذا كان Redis متاحاً (اختياري)
+المصدر الوحيد للحقيقة:
+  https://www.argaam.com/ar/company/companies-prices?market=3
+  → يعرض جداول HTML تحتوي على أسهم تاسي فقط (market_id=3)
+  → لا يحتوي على أسهم نمو (market_id=14) أو ETFs
 
-القواعد:
-  - فقط رموز تاسي الرئيسي: طول 4 أرقام يبدأ بـ [1-8]
-  - يستبعد تلقائياً: نمو (9xxx) + ETFs + القطاعات (900xx)
-  - يُحدِّث الجدول بـ UPSERT (لا يحذف الأسهم القديمة بل يضع is_active=False)
+المنطق:
+  1. Scraping من argaam → قائمة نظيفة ~230-280 رمز تاسي
+  2. Upsert في market_data.symbols (is_active=True)
+  3. تعطيل (is_active=False) أي رمز موجود في DB لم يعد في القائمة الرسمية
 
 الاستخدام:
-  python3 scripts/sync_symbols.py                    # تشغيل مباشر
-  python3 scripts/sync_symbols.py --dry-run          # معاينة بدون حفظ
-  python3 scripts/sync_symbols.py --force-refresh    # تجاهل الكاش
-
-الدوال المُصدَّرة:
-  - sync_tasi_symbols()          → Dict (نتائج المزامنة)
-  - get_tasi_symbols_from_db()   → List[str] (للاستخدام في symbol_universe)
+  python3 scripts/sync_symbols.py          # تشغيل فعلي مع حفظ في DB
+  python3 scripts/sync_symbols.py --dry-run  # اختبار بدون حفظ
 """
 
+from __future__ import annotations
+
+import argparse
+import logging
 import re
 import sys
-from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+import time
+from datetime import datetime, timezone
+from typing import Optional
 
-from loguru import logger
+import requests
+from bs4 import BeautifulSoup
 
-# ── نمط رموز تاسي الرئيسي ────────────────────────────────────────────────────
-_TASI_SYMBOL_RE = re.compile(r'^[1-8][0-9]{3}$')
+logger = logging.getLogger(__name__)
 
+# ─── إعدادات الـ Scraping ────────────────────────────────────────────────────
+
+_ARGAAM_TASI_URL = "https://www.argaam.com/ar/company/companies-prices?market=3"
+
+_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "ar,en;q=0.9",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Referer": "https://www.argaam.com/ar/",
+}
+
+_TASI_SYMBOL_RE = re.compile(r"^[1-8]\d{3}$")
+
+# ─── دالة الفلترة ────────────────────────────────────────────────────────────
 
 def is_tasi_main_market(symbol: str) -> bool:
-    """True فقط لأسهم تاسي الرئيسي (4 أرقام تبدأ بـ 1-8)."""
+    """True فقط لأسهم تاسي الرئيسي: 4 أرقام تبدأ من [1-8]."""
     return bool(_TASI_SYMBOL_RE.match(str(symbol).strip()))
 
 
-# ── قاموس القطاعات ───────────────────────────────────────────────────────────
-SECTOR_MAP: Dict[str, str] = {
-    '90010': 'البنوك',
-    '90011': 'السلع الرأسمالية',
-    '90012': 'الخدمات التجارية والمهنية',
-    '90013': 'السلع الاستهلاكية التقديرية',
-    '90014': 'السلع المعمّرة والملابس',
-    '90015': 'السلع الاستهلاكية الأساسية',
-    '90016': 'خدمات المستهلك',
-    '90017': 'الطاقة',
-    '90018': 'الخدمات المالية',
-    '90019': 'الأغذية والمشروبات',
-    '90020': 'الرعاية الصحية',
-    '90021': 'التأمين',
-    '90022': 'المواد الأساسية',
-    '90023': 'الإعلام والترفيه',
-    '90024': 'الأدوية والتقنية الحيوية',
-    '90025': 'صناديق الاستثمار العقاري',
-    '90026': 'إدارة وتطوير العقارات',
-    '90027': 'البرمجيات والخدمات',
-    '90028': 'خدمات الاتصالات',
-    '90029': 'النقل',
-    '90030': 'المرافق',
-}
+# ─── Scraping من argaam ──────────────────────────────────────────────────────
 
-# ── ربط الأسهم بالقطاعات ─────────────────────────────────────────────────────
-_STOCK_SECTOR: Dict[str, str] = {
-    # البنوك 90010
-    '1010': '90010', '1020': '90010', '1030': '90010', '1040': '90010',
-    '1050': '90010', '1060': '90010', '1080': '90010', '1100': '90010',
-    '1110': '90010', '1120': '90010', '1140': '90010', '1150': '90010',
-    '1180': '90010', '2110': '90010',
-    # الطاقة 90017
-    '2222': '90017', '2030': '90017', '2382': '90017',
-    # المواد الأساسية 90022
-    '2010': '90022', '2060': '90022', '2170': '90022', '2210': '90022',
-    '2250': '90022', '2290': '90022', '2300': '90022', '2310': '90022',
-    '2320': '90022', '2330': '90022', '2340': '90022', '2350': '90022',
-    '2360': '90022', '2370': '90022', '2380': '90022', '2390': '90022',
-    # السلع الرأسمالية 90011
-    '1303': '90011', '1304': '90011', '1320': '90011', '2040': '90011',
-    '2080': '90011', '2090': '90011', '2100': '90011', '2120': '90011',
-    '2130': '90011', '2140': '90011', '2150': '90011', '2160': '90011',
-    '2180': '90011', '2190': '90011', '2200': '90011', '2220': '90011',
-    '2230': '90011', '2240': '90011', '2260': '90011', '2270': '90011',
-    '2280': '90011',
-    # الخدمات التجارية 90012
-    '1201': '90012', '1202': '90012', '1203': '90012', '1204': '90012',
-    '1205': '90012', '1206': '90012', '1207': '90012', '1208': '90012',
-    '1209': '90012', '1210': '90012', '1211': '90012', '1212': '90012',
-    '1213': '90012', '1214': '90012', '1215': '90012', '1216': '90012',
-    '1217': '90012', '1218': '90012', '1219': '90012', '1220': '90012',
-    '1221': '90012', '1222': '90012', '1223': '90012',
-    # السلع الاستهلاكية الأساسية 90015
-    '2050': '90015', '2070': '90015',
-    '6001': '90015', '6002': '90015', '6003': '90015', '6004': '90015',
-    '6005': '90015', '6006': '90015', '6007': '90015', '6008': '90015',
-    '6009': '90015', '6010': '90015', '6011': '90015', '6012': '90015',
-    '6013': '90015', '6014': '90015', '6015': '90015', '6016': '90015',
-    '6017': '90015', '6018': '90015', '6019': '90015', '6020': '90015',
-    '6090': '90015',
-    # الرعاية الصحية 90020
-    '4500': '90020', '4501': '90020', '4502': '90020', '4503': '90020',
-    '4504': '90020', '4505': '90020', '4506': '90020', '4507': '90020',
-    '4508': '90020', '4509': '90020', '4510': '90020', '4511': '90020',
-    '4512': '90020', '4513': '90020', '4514': '90020', '4515': '90020',
-    '4516': '90020', '4517': '90020', '4518': '90020', '4519': '90020',
-    '4520': '90020', '4521': '90020', '4522': '90020', '4523': '90020',
-    '4524': '90020',
-    # التأمين 90021
-    '8010': '90021', '8012': '90021', '8020': '90021', '8030': '90021',
-    '8040': '90021', '8050': '90021', '8060': '90021', '8070': '90021',
-    '8100': '90021', '8110': '90021', '8120': '90021', '8130': '90021',
-    '8150': '90021', '8160': '90021', '8170': '90021', '8180': '90021',
-    '8190': '90021', '8200': '90021', '8210': '90021', '8230': '90021',
-    '8240': '90021', '8250': '90021', '8260': '90021', '8270': '90021',
-    '8280': '90021', '8300': '90021', '8310': '90021', '8311': '90021',
-    '8312': '90021',
-    # الخدمات المالية 90018
-    '1111': '90018', '1112': '90018', '1113': '90018', '1114': '90018',
-    '1115': '90018', '1116': '90018', '1117': '90018', '1118': '90018',
-    '1119': '90018', '4142': '90018', '4143': '90018', '4144': '90018',
-    '4145': '90018', '4146': '90018', '4147': '90018', '4148': '90018',
-    '4149': '90018',
-    # العقارات 90026
-    '4220': '90026', '4221': '90026', '4222': '90026', '4223': '90026',
-    '4224': '90026', '4225': '90026', '4226': '90026', '4227': '90026',
-    '4228': '90026', '4229': '90026', '4230': '90026', '4231': '90026',
-    '4232': '90026', '4233': '90026', '4234': '90026', '4235': '90026',
-    '4236': '90026', '4237': '90026', '4238': '90026', '4239': '90026',
-    '4240': '90026', '4241': '90026', '4242': '90026', '4243': '90026',
-    '4244': '90026', '4245': '90026', '4246': '90026', '4247': '90026',
-    '4248': '90026', '4249': '90026', '4250': '90026',
-    # صناديق الاستثمار العقاري 90025
-    '4330': '90025', '4331': '90025', '4332': '90025', '4333': '90025',
-    '4334': '90025', '4335': '90025', '4336': '90025', '4337': '90025',
-    '4338': '90025', '4339': '90025', '4340': '90025', '4341': '90025',
-    '4342': '90025', '4343': '90025', '4344': '90025', '4345': '90025',
-    '4346': '90025', '4347': '90025', '4348': '90025',
-    # الاتصالات 90028
-    '7010': '90028', '7020': '90028', '7030': '90028', '7040': '90028',
-    # النقل 90029
-    '4261': '90029', '4262': '90029', '4263': '90029', '4264': '90029',
-    '4265': '90029', '4266': '90029', '4267': '90029', '4268': '90029',
-    '4269': '90029',
-    # المرافق 90030
-    '5110': '90030',
-    # البرمجيات والخدمات 90027
-    '7200': '90027', '7201': '90027', '7202': '90027', '7203': '90027',
-    '7204': '90027', '7205': '90027', '7206': '90027', '7207': '90027',
-    '7208': '90027', '7209': '90027', '7210': '90027', '7211': '90027',
-    '7212': '90027', '7213': '90027', '7214': '90027', '7215': '90027',
-    '7216': '90027', '7217': '90027', '7218': '90027', '7219': '90027',
-    '7220': '90027', '7221': '90027', '7222': '90027', '7223': '90027',
-    '7224': '90027', '7225': '90027', '7226': '90027', '7227': '90027',
-    '7228': '90027', '7229': '90027', '7230': '90027', '7231': '90027',
-    '7232': '90027', '7233': '90027', '7234': '90027', '7235': '90027',
-    '7236': '90027', '7237': '90027', '7238': '90027', '7239': '90027',
-    '7240': '90027', '7241': '90027', '7242': '90027', '7243': '90027',
-    '7244': '90027', '7245': '90027', '7246': '90027', '7247': '90027',
-    '7248': '90027', '7249': '90027', '7250': '90027',
-    # الإعلام والترفيه 90023
-    '4070': '90023', '4071': '90023', '4072': '90023', '4073': '90023',
-    '4074': '90023', '4075': '90023', '4076': '90023', '4077': '90023',
-    '4078': '90023', '4079': '90023',
-    # الأغذية والمشروبات 90019
-    '2100': '90019', '2270': '90019', '2280': '90019', '2290': '90019',
-    # السلع الاستهلاكية التقديرية 90013
-    '4050': '90013', '4051': '90013', '4052': '90013', '4053': '90013',
-    '4054': '90013', '4055': '90013', '4056': '90013', '4057': '90013',
-    '4058': '90013', '4059': '90013',
-    # خدمات المستهلك 90016
-    '4040': '90016', '4041': '90016', '4042': '90016', '4043': '90016',
-    '4044': '90016', '4045': '90016', '4046': '90016', '4047': '90016',
-    '4048': '90016', '4049': '90016',
-    # الأدوية 90024
-    '4013': '90024', '4014': '90024', '4015': '90024', '4016': '90024',
-    '4017': '90024', '4018': '90024', '4019': '90024',
-    # متنوع 90011
-    '4001': '90011', '4002': '90011', '4003': '90011', '4004': '90011',
-    '4005': '90011', '4006': '90011', '4007': '90011', '4008': '90011',
-    '4009': '90011', '4010': '90011', '4020': '90011', '4030': '90011',
-    # أخرى
-    '2020': '90022', '3002': '90022', '3003': '90022', '3004': '90022',
-    '3005': '90022', '3007': '90022', '3008': '90022', '3010': '90022',
-    '3020': '90022', '3030': '90022', '3040': '90022', '3050': '90022',
-    '3060': '90022', '3080': '90022', '3090': '90022',
-    '1302': '90011', '1301': '90011',
-}
-
-# ── القائمة الشاملة لجميع أسهم تاسي الرئيسي ─────────────────────────────────
-# مصدر: موقع تداول السعودية — آخر تحديث أبريل 2026
-_TASI_ALL_SYMBOLS: List[str] = sorted(list(set(s for s in [
-    # البنوك
-    '1010', '1020', '1030', '1040', '1050', '1060', '1080', '1100',
-    '1110', '1120', '1140', '1150', '1180', '2110',
-    # الطاقة
-    '2222', '2030', '2382',
-    # المواد الأساسية
-    '2010', '2060', '2170', '2210', '2250', '2290', '2300', '2310',
-    '2320', '2330', '2340', '2350', '2360', '2370', '2380', '2390',
-    # السلع الرأسمالية
-    '1303', '1304', '1320', '2040', '2080', '2090', '2100', '2120',
-    '2130', '2140', '2150', '2160', '2180', '2190', '2200', '2220',
-    '2230', '2240', '2260', '2270', '2280',
-    # الخدمات التجارية
-    '1201', '1202', '1203', '1204', '1205', '1206', '1207', '1208',
-    '1209', '1210', '1211', '1212', '1213', '1214', '1215', '1216',
-    '1217', '1218', '1219', '1220', '1221', '1222', '1223',
-    # السلع الاستهلاكية الأساسية
-    '2050', '2070',
-    '6001', '6002', '6003', '6004', '6005', '6006', '6007', '6008',
-    '6009', '6010', '6011', '6012', '6013', '6014', '6015', '6016',
-    '6017', '6018', '6019', '6020', '6090',
-    # الرعاية الصحية
-    '4500', '4501', '4502', '4503', '4504', '4505', '4506', '4507',
-    '4508', '4509', '4510', '4511', '4512', '4513', '4514', '4515',
-    '4516', '4517', '4518', '4519', '4520', '4521', '4522', '4523',
-    '4524',
-    # التأمين
-    '8010', '8012', '8020', '8030', '8040', '8050', '8060', '8070',
-    '8100', '8110', '8120', '8130', '8150', '8160', '8170', '8180',
-    '8190', '8200', '8210', '8230', '8240', '8250', '8260', '8270',
-    '8280', '8300', '8310', '8311', '8312',
-    # الخدمات المالية
-    '1111', '1112', '1113', '1114', '1115', '1116', '1117', '1118',
-    '1119', '4142', '4143', '4144', '4145', '4146', '4147', '4148',
-    '4149',
-    # العقارات
-    '4220', '4221', '4222', '4223', '4224', '4225', '4226', '4227',
-    '4228', '4229', '4230', '4231', '4232', '4233', '4234', '4235',
-    '4236', '4237', '4238', '4239', '4240', '4241', '4242', '4243',
-    '4244', '4245', '4246', '4247', '4248', '4249', '4250',
-    # صناديق الاستثمار العقاري
-    '4330', '4331', '4332', '4333', '4334', '4335', '4336', '4337',
-    '4338', '4339', '4340', '4341', '4342', '4343', '4344', '4345',
-    '4346', '4347', '4348',
-    # الاتصالات
-    '7010', '7020', '7030', '7040',
-    # النقل
-    '4261', '4262', '4263', '4264', '4265', '4266', '4267', '4268',
-    '4269',
-    # المرافق
-    '5110',
-    # البرمجيات والخدمات
-    '7200', '7201', '7202', '7203', '7204', '7205', '7206', '7207',
-    '7208', '7209', '7210', '7211', '7212', '7213', '7214', '7215',
-    '7216', '7217', '7218', '7219', '7220', '7221', '7222', '7223',
-    '7224', '7225', '7226', '7227', '7228', '7229', '7230', '7231',
-    '7232', '7233', '7234', '7235', '7236', '7237', '7238', '7239',
-    '7240', '7241', '7242', '7243', '7244', '7245', '7246', '7247',
-    '7248', '7249', '7250',
-    # الإعلام والترفيه
-    '4070', '4071', '4072', '4073', '4074', '4075', '4076', '4077',
-    '4078', '4079',
-    # الأغذية والمشروبات
-    '2100', '2270', '2280', '2290',
-    # السلع الاستهلاكية التقديرية
-    '4050', '4051', '4052', '4053', '4054', '4055', '4056', '4057',
-    '4058', '4059',
-    # خدمات المستهلك
-    '4040', '4041', '4042', '4043', '4044', '4045', '4046', '4047',
-    '4048', '4049',
-    # الأدوية
-    '4013', '4014', '4015', '4016', '4017', '4018', '4019',
-    # متنوع
-    '4001', '4002', '4003', '4004', '4005', '4006', '4007', '4008',
-    '4009', '4010', '4020', '4030',
-    # أخرى
-    '2020', '3002', '3003', '3004', '3005', '3007', '3008', '3010',
-    '3020', '3030', '3040', '3050', '3060', '3080', '3090',
-    '1302', '1301',
-] if is_tasi_main_market(s))))
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# الدالة الرئيسية
-# ─────────────────────────────────────────────────────────────────────────────
-
-def sync_tasi_symbols(dry_run: bool = False, force_refresh: bool = False) -> Dict:
+def scrape_tasi_symbols_from_argaam(
+    retries: int = 3,
+    timeout: int = 20,
+) -> list[str]:
     """
-    يجمع قائمة أسهم تاسي من مصادر متعددة ويحفظها في market_data.symbols.
+    يجلب قائمة أسهم تاسي من جداول HTML في argaam.com.
 
-    المصادر (بالأولوية):
-      1. القائمة الشاملة الثابتة _TASI_ALL_SYMBOLS (~230 سهم)
-      2. market_data.ohlcv — الأسهم التي جمعها market_reporter
-      3. SAHMK Redis cache (إذا كان متاحاً)
-
-    Args:
-        dry_run: إذا True — يطبع النتائج فقط دون حفظ في DB
-        force_refresh: إذا True — يتجاهل الكاش ويجمع من جميع المصادر
+    يستخرج الرمز من العمود الأول في كل صف من جداول الأسعار.
+    يُطبّق فلتر is_tasi_main_market() للتأكد من نظافة القائمة.
 
     Returns:
-        {
-            'total_fetched': int,
-            'tasi_count': int,
-            'excluded_count': int,
-            'upserted': int,
-            'deactivated': int,
-            'symbols': List[str],
-            'timestamp': str,
-            'sources': List[str],
-        }
+        قائمة مرتبة من رموز تاسي (مثل ['1010', '1020', ...])
+    Raises:
+        RuntimeError: إذا فشل الجلب بعد كل المحاولات
     """
-    result = {
-        'total_fetched': 0,
-        'tasi_count': 0,
-        'excluded_count': 0,
-        'upserted': 0,
-        'deactivated': 0,
-        'symbols': [],
-        'timestamp': datetime.utcnow().isoformat(),
-        'sources': [],
-        'error': None,
+    last_error: Optional[Exception] = None
+
+    for attempt in range(1, retries + 1):
+        try:
+            logger.info(
+                f"[sync_symbols] Scraping argaam.com (attempt {attempt}/{retries})..."
+            )
+            resp = requests.get(
+                _ARGAAM_TASI_URL,
+                headers=_HEADERS,
+                timeout=timeout,
+            )
+            resp.raise_for_status()
+
+            soup = BeautifulSoup(resp.text, "html.parser")
+            symbols: set[str] = set()
+
+            for table in soup.find_all("table"):
+                for row in table.find_all("tr"):
+                    cells = row.find_all("td")
+                    if not cells:
+                        continue
+                    candidate = cells[0].get_text(strip=True)
+                    if is_tasi_main_market(candidate):
+                        symbols.add(candidate)
+
+            if not symbols:
+                raise ValueError(
+                    "No TASI symbols found in argaam HTML — page structure may have changed"
+                )
+
+            result = sorted(symbols)
+            logger.info(
+                f"[sync_symbols] ✅ Scraped {len(result)} TASI symbols from argaam.com"
+            )
+            return result
+
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                f"[sync_symbols] Attempt {attempt} failed: {exc}"
+            )
+            if attempt < retries:
+                time.sleep(5 * attempt)
+
+    raise RuntimeError(
+        f"[sync_symbols] All {retries} scraping attempts failed. "
+        f"Last error: {last_error}"
+    )
+
+
+# ─── حفظ في قاعدة البيانات ───────────────────────────────────────────────────
+
+def _upsert_symbols_to_db(symbols: list[str]) -> dict:
+    """
+    يُنفّذ upsert للرموز في market_data.symbols:
+    - يُضيف الرموز الجديدة
+    - يُعيد تفعيل الرموز التي كانت معطّلة
+    - يُعطّل الرموز التي لم تعد في القائمة الرسمية
+
+    Returns:
+        dict: إحصائيات العملية
+    """
+    from scripts.database import db
+
+    now = datetime.now(timezone.utc)
+    symbols_set = set(symbols)
+
+    stats = {
+        "inserted": 0,
+        "reactivated": 0,
+        "deactivated": 0,
+        "unchanged": 0,
     }
 
-    all_symbols: set = set()
+    with db.get_session() as session:
+        # ── 1. جلب الرموز الموجودة في DB ─────────────────────────────────
+        existing_rows = session.execute(
+            """
+            SELECT symbol, is_active
+            FROM market_data.symbols
+            WHERE market = 'TASI'
+            """
+        ).fetchall()
 
-    # ── المصدر 1: القائمة الشاملة الثابتة ──────────────────────────────────
-    seed_symbols = set(_TASI_ALL_SYMBOLS)
-    all_symbols.update(seed_symbols)
-    result['sources'].append(f'seed_list ({len(seed_symbols)} symbols)')
-    logger.info(f"📋 sync_symbols: Seed list: {len(seed_symbols)} TASI symbols")
+        existing_map = {row[0]: row[1] for row in existing_rows}
+        existing_symbols = set(existing_map.keys())
 
-    # ── المصدر 2: market_data.ohlcv ─────────────────────────────────────────
-    try:
-        from scripts.database import db
-        from sqlalchemy import text
+        # ── 2. Upsert الرموز الجديدة من argaam ───────────────────────────
+        for sym in symbols:
+            if sym not in existing_symbols:
+                # رمز جديد — أضفه
+                session.execute(
+                    """
+                    INSERT INTO market_data.symbols
+                        (symbol, market, is_active, last_synced_at)
+                    VALUES
+                        (:symbol, 'TASI', TRUE, :now)
+                    ON CONFLICT (symbol) DO UPDATE SET
+                        is_active = TRUE,
+                        last_synced_at = :now
+                    """,
+                    {"symbol": sym, "now": now},
+                )
+                stats["inserted"] += 1
+            elif not existing_map[sym]:
+                # رمز موجود لكن معطّل — أعد تفعيله
+                session.execute(
+                    """
+                    UPDATE market_data.symbols
+                    SET is_active = TRUE, last_synced_at = :now
+                    WHERE symbol = :symbol
+                    """,
+                    {"symbol": sym, "now": now},
+                )
+                stats["reactivated"] += 1
+            else:
+                # رمز موجود ونشط — حدّث وقت المزامنة فقط
+                session.execute(
+                    """
+                    UPDATE market_data.symbols
+                    SET last_synced_at = :now
+                    WHERE symbol = :symbol
+                    """,
+                    {"symbol": sym, "now": now},
+                )
+                stats["unchanged"] += 1
 
-        with db.get_session() as session:
-            rows = session.execute(text("""
-                SELECT DISTINCT symbol
-                FROM market_data.ohlcv
-                WHERE symbol ~ '^[1-8][0-9]{3}$'
-                ORDER BY symbol
-            """)).fetchall()
-
-        ohlcv_symbols = {r[0] for r in rows}
-        new_from_ohlcv = ohlcv_symbols - all_symbols
-        all_symbols.update(ohlcv_symbols)
-        result['sources'].append(
-            f'ohlcv ({len(ohlcv_symbols)} symbols, {len(new_from_ohlcv)} new)'
-        )
-        logger.info(
-            f"📊 sync_symbols: ohlcv source: {len(ohlcv_symbols)} symbols "
-            f"({len(new_from_ohlcv)} new beyond seed list)"
-        )
-    except Exception as e:
-        logger.warning(f"⚠️ sync_symbols: Could not read ohlcv: {e}")
-        result['sources'].append('ohlcv (unavailable)')
-
-    # ── المصدر 3: SAHMK Redis cache (اختياري) ───────────────────────────────
-    try:
-        from scripts.redis_manager import redis_manager
-        cached = redis_manager.get('sahmk:symbols_list')
-        if cached:
-            redis_tasi = {s for s in cached if is_tasi_main_market(s)}
-            new_from_redis = redis_tasi - all_symbols
-            all_symbols.update(redis_tasi)
-            result['sources'].append(
-                f'redis_cache ({len(redis_tasi)} symbols, {len(new_from_redis)} new)'
-            )
+        # ── 3. تعطيل الرموز التي لم تعد في القائمة الرسمية ──────────────
+        stale_symbols = existing_symbols - symbols_set
+        if stale_symbols:
+            for sym in stale_symbols:
+                session.execute(
+                    """
+                    UPDATE market_data.symbols
+                    SET is_active = FALSE, last_synced_at = :now
+                    WHERE symbol = :symbol AND market = 'TASI'
+                    """,
+                    {"symbol": sym, "now": now},
+                )
+                stats["deactivated"] += 1
             logger.info(
-                f"🔄 sync_symbols: Redis cache: {len(redis_tasi)} TASI symbols "
-                f"({len(new_from_redis)} new)"
+                f"[sync_symbols] 🚫 Deactivated {len(stale_symbols)} stale symbols: "
+                f"{sorted(stale_symbols)[:20]}{'...' if len(stale_symbols) > 20 else ''}"
             )
-    except Exception:
-        # Redis غير متاح — هذا طبيعي خارج Docker
-        result['sources'].append('redis_cache (unavailable)')
 
-    # ── فلترة نهائية: تاسي فقط ──────────────────────────────────────────────
-    tasi_symbols = sorted([s for s in all_symbols if is_tasi_main_market(s)])
-    excluded = [s for s in all_symbols if not is_tasi_main_market(s)]
+        session.commit()
 
-    result['total_fetched'] = len(all_symbols)
-    result['tasi_count'] = len(tasi_symbols)
-    result['excluded_count'] = len(excluded)
-    result['symbols'] = tasi_symbols
+    return stats
 
+
+# ─── الدالة الرئيسية ─────────────────────────────────────────────────────────
+
+def sync_tasi_symbols(dry_run: bool = False) -> dict:
+    """
+    تُزامن قائمة أسهم تاسي من argaam.com إلى market_data.symbols.
+
+    Args:
+        dry_run: إذا True، يجلب القائمة ويطبعها بدون حفظ في DB
+
+    Returns:
+        dict مع مفاتيح: tasi_count, symbols, db_stats, source
+    """
+    # ── الخطوة 1: Scraping من argaam ─────────────────────────────────────
+    symbols = scrape_tasi_symbols_from_argaam()
+
+    result = {
+        "tasi_count": len(symbols),
+        "symbols": symbols,
+        "source": "argaam.com scraping",
+        "db_stats": None,
+    }
+
+    # ── الخطوة 2: طباعة الملخص ───────────────────────────────────────────
     logger.info(
-        f"✅ sync_symbols: {len(tasi_symbols)} TASI symbols collected "
-        f"from {len(result['sources'])} sources | "
-        f"{len(excluded)} excluded (Nomu/ETFs/sectors)"
+        f"\n{'='*60}\n"
+        f"📊 نتائج مزامنة أسهم تاسي\n"
+        f"{'='*60}\n"
+        f"  المصدر              : argaam.com (market_id=3)\n"
+        f"  أسهم تاسي           : {len(symbols)}\n"
+        f"  أسهم نمو/ETFs       : 0 (مستبعدة تلقائياً)\n"
+        f"  أول 10 رموز         : {symbols[:10]}\n"
+        f"{'='*60}"
     )
 
     if dry_run:
-        logger.info(f"🔍 DRY RUN — would upsert {len(tasi_symbols)} symbols")
-        logger.info(f"   Sample: {tasi_symbols[:15]}")
+        logger.info("[sync_symbols] 🔍 DRY RUN — لم يتم الحفظ في DB")
+        print(f"\n✅ DRY RUN: {len(symbols)} TASI symbols from argaam.com")
+        print(f"Sample: {symbols[:20]}")
         return result
 
-    # ── حفظ في DB ────────────────────────────────────────────────────────────
-    upserted, deactivated = _upsert_symbols_to_db(tasi_symbols)
-    result['upserted'] = upserted
-    result['deactivated'] = deactivated
+    # ── الخطوة 3: حفظ في DB ──────────────────────────────────────────────
+    logger.info("[sync_symbols] 💾 Saving to market_data.symbols...")
+    db_stats = _upsert_symbols_to_db(symbols)
+    result["db_stats"] = db_stats
 
     logger.info(
-        f"✅ sync_symbols complete: {upserted} upserted, {deactivated} deactivated "
-        f"({len(tasi_symbols)} active TASI symbols)"
+        f"[sync_symbols] ✅ DB sync complete:\n"
+        f"  Inserted   : {db_stats['inserted']}\n"
+        f"  Reactivated: {db_stats['reactivated']}\n"
+        f"  Unchanged  : {db_stats['unchanged']}\n"
+        f"  Deactivated: {db_stats['deactivated']} (stale symbols removed)\n"
+        f"  Total active: {len(symbols)}"
     )
+
     return result
 
 
-def _upsert_symbols_to_db(active_symbols: List[str]) -> Tuple[int, int]:
-    """
-    يحفظ قائمة الأسهم في market_data.symbols بـ UPSERT.
-    الأسهم غير الموجودة في القائمة تُضبط is_active=False.
+# ─── Celery Task ─────────────────────────────────────────────────────────────
 
-    Returns:
-        (upserted_count, deactivated_count)
-    """
+def _get_celery_task():
+    """إنشاء Celery task بشكل lazy لتجنب circular imports."""
     try:
-        from scripts.database import db
-        from sqlalchemy import text
+        from celery import shared_task
 
-        upsert_sql = text("""
-        INSERT INTO market_data.symbols
-            (symbol, name_ar, name_en, sector_id, sector_name_ar, market, is_active, last_synced_at)
-        VALUES
-            (:symbol, :name_ar, :name_en, :sector_id, :sector_name_ar, :market, :is_active, NOW())
-        ON CONFLICT (symbol) DO UPDATE SET
-            name_ar        = EXCLUDED.name_ar,
-            name_en        = EXCLUDED.name_en,
-            sector_id      = EXCLUDED.sector_id,
-            sector_name_ar = EXCLUDED.sector_name_ar,
-            market         = EXCLUDED.market,
-            is_active      = EXCLUDED.is_active,
-            last_synced_at = NOW(),
-            updated_at     = NOW();
-        """)
-
-        with db.get_session() as session:
-            # Upsert الأسهم النشطة
-            for sym in active_symbols:
-                sector_id = _STOCK_SECTOR.get(sym, '')
-                session.execute(upsert_sql, {
-                    'symbol':         sym,
-                    'name_ar':        sym,
-                    'name_en':        sym,
-                    'sector_id':      sector_id,
-                    'sector_name_ar': SECTOR_MAP.get(sector_id, ''),
-                    'market':         'TASI',
-                    'is_active':      True,
-                })
-
-            # وضع is_active=False للأسهم التي لم تعد في القائمة
-            if active_symbols:
-                placeholders = ','.join([f':s{i}' for i in range(len(active_symbols))])
-                params = {f's{i}': sym for i, sym in enumerate(active_symbols)}
-                deactivate_result = session.execute(text(f"""
-                    UPDATE market_data.symbols
-                    SET is_active = FALSE, updated_at = NOW()
-                    WHERE market = 'TASI'
-                      AND symbol NOT IN ({placeholders})
-                      AND is_active = TRUE
-                """), params)
-                deactivated = deactivate_result.rowcount
-            else:
-                deactivated = 0
-
-            session.commit()
-
-        return len(active_symbols), deactivated
-
-    except Exception as e:
-        logger.error(f"❌ _upsert_symbols_to_db error: {e}")
-        return 0, 0
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# دالة القراءة من DB (للاستخدام في symbol_universe)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def get_tasi_symbols_from_db(include_inactive: bool = False) -> List[str]:
-    """
-    يُعيد قائمة أسهم تاسي من market_data.symbols.
-    يُستخدم بدلاً من SELECT DISTINCT FROM ohlcv.
-
-    Args:
-        include_inactive: إذا True — يشمل الأسهم غير النشطة
-
-    Returns:
-        قائمة مرتبة برموز تاسي
-    """
-    try:
-        from scripts.database import db
-        from sqlalchemy import text
-
-        where_clause = "WHERE market = 'TASI'" + (
-            "" if include_inactive else " AND is_active = TRUE"
+        @shared_task(
+            name="scripts.sync_symbols.sync_tasi_symbols_task",
+            bind=True,
+            max_retries=3,
         )
-        with db.get_session() as session:
-            rows = session.execute(text(f"""
-                SELECT symbol FROM market_data.symbols
-                {where_clause}
-                ORDER BY symbol
-            """)).fetchall()
+        def sync_tasi_symbols_task(self):
+            """Celery task: مزامنة يومية لقائمة أسهم تاسي من argaam.com."""
+            try:
+                logger.info("[sync_symbols_task] Starting daily TASI symbols sync...")
+                result = sync_tasi_symbols(dry_run=False)
+                logger.info(
+                    f"[sync_symbols_task] ✅ Sync complete: "
+                    f"{result['tasi_count']} active TASI symbols"
+                )
+                return {
+                    "status": "success",
+                    "tasi_count": result["tasi_count"],
+                    "db_stats": result["db_stats"],
+                }
+            except Exception as exc:
+                logger.error(f"[sync_symbols_task] ❌ Sync failed: {exc}")
+                raise self.retry(exc=exc, countdown=300)
 
-        symbols = [r[0] for r in rows]
-        if symbols:
-            logger.info(
-                f"📋 get_tasi_symbols_from_db: {len(symbols)} TASI symbols "
-                f"({'active only' if not include_inactive else 'all'})"
-            )
-            return symbols
-
-        # Fallback إذا كان الجدول فارغاً
-        logger.warning(
-            "⚠️ market_data.symbols is empty — falling back to seed list. "
-            "Run: python3 scripts/sync_symbols.py"
-        )
-        return _TASI_ALL_SYMBOLS
-
-    except Exception as e:
-        logger.warning(f"⚠️ get_tasi_symbols_from_db error: {e} — using seed list")
-        return _TASI_ALL_SYMBOLS
+        return sync_tasi_symbols_task
+    except ImportError:
+        return None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Celery Task
-# ─────────────────────────────────────────────────────────────────────────────
+# تسجيل المهمة عند الاستيراد (إذا كان Celery متاحاً)
+sync_tasi_symbols_task = _get_celery_task()
 
-try:
-    from celery import shared_task
 
-    @shared_task(
-        name='scripts.sync_symbols.sync_tasi_symbols_task',
-        bind=True,
-        max_retries=3,
-        default_retry_delay=300,
+# ─── تشغيل مباشر ─────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)-8s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
     )
-    def sync_tasi_symbols_task(self, force_refresh: bool = False):
-        """Celery task: مزامنة يومية لقائمة أسهم تاسي."""
-        logger.info("🔄 sync_tasi_symbols_task: Starting daily symbol sync...")
-        try:
-            result = sync_tasi_symbols(force_refresh=force_refresh)
-            logger.info(
-                f"✅ sync_tasi_symbols_task complete: "
-                f"{result['tasi_count']} symbols, "
-                f"{result['upserted']} upserted"
-            )
-            return result
-        except Exception as exc:
-            logger.error(f"❌ sync_tasi_symbols_task failed: {exc}")
-            raise self.retry(exc=exc)
-
-except ImportError:
-    # Celery غير متاح — تشغيل مباشر فقط
-    pass
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# تشغيل مباشر
-# ─────────────────────────────────────────────────────────────────────────────
-
-if __name__ == '__main__':
-    import argparse
 
     parser = argparse.ArgumentParser(
-        description='مزامنة قائمة أسهم تاسي الرئيسي في market_data.symbols'
+        description="مزامنة قائمة أسهم تاسي من argaam.com"
     )
     parser.add_argument(
-        '--dry-run', action='store_true',
-        help='معاينة النتائج بدون حفظ في DB'
-    )
-    parser.add_argument(
-        '--force-refresh', action='store_true',
-        help='تجاهل الكاش وإعادة الجلب من جميع المصادر'
+        "--dry-run",
+        action="store_true",
+        help="اجلب القائمة وأطبعها بدون حفظ في DB",
     )
     args = parser.parse_args()
 
-    result = sync_tasi_symbols(dry_run=args.dry_run, force_refresh=args.force_refresh)
-
-    print("\n" + "=" * 60)
-    print("📊 نتائج مزامنة أسهم تاسي")
-    print("=" * 60)
-    print(f"  المصادر المستخدمة : {', '.join(result['sources'])}")
-    print(f"  إجمالي الرموز     : {result['total_fetched']}")
-    print(f"  أسهم تاسي         : {result['tasi_count']}")
-    print(f"  مستبعد            : {result['excluded_count']}")
-    print(f"  محفوظ في DB       : {result['upserted']}")
-    print(f"  غير نشط           : {result['deactivated']}")
-    if result.get('error'):
-        print(f"  ⚠️ تحذير          : {result['error']}")
-    print("=" * 60)
-    print(f"\nعينة من الرموز: {result['symbols'][:20]}")
-    print(f"\n✅ تم بنجاح في: {result['timestamp']}")
+    try:
+        result = sync_tasi_symbols(dry_run=args.dry_run)
+        print(f"\n✅ Done: {result['tasi_count']} TASI symbols")
+        if result["db_stats"]:
+            s = result["db_stats"]
+            print(
+                f"   DB: +{s['inserted']} new, "
+                f"↑{s['reactivated']} reactivated, "
+                f"✓{s['unchanged']} unchanged, "
+                f"✗{s['deactivated']} deactivated"
+            )
+        sys.exit(0)
+    except Exception as e:
+        print(f"\n❌ Error: {e}", file=sys.stderr)
+        sys.exit(1)
