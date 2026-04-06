@@ -30,6 +30,7 @@ from typing import Optional
 
 import requests
 from bs4 import BeautifulSoup
+from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
 
@@ -152,11 +153,11 @@ def _upsert_symbols_to_db(symbols: list[str]) -> dict:
     with db.get_session() as session:
         # ── 1. جلب الرموز الموجودة في DB ─────────────────────────────────
         existing_rows = session.execute(
-            """
+            text("""
             SELECT symbol, is_active
             FROM market_data.symbols
             WHERE market = 'TASI'
-            """
+            """)
         ).fetchall()
 
         existing_map = {row[0]: row[1] for row in existing_rows}
@@ -167,7 +168,7 @@ def _upsert_symbols_to_db(symbols: list[str]) -> dict:
             if sym not in existing_symbols:
                 # رمز جديد — أضفه
                 session.execute(
-                    """
+                    text("""
                     INSERT INTO market_data.symbols
                         (symbol, market, is_active, last_synced_at)
                     VALUES
@@ -175,29 +176,29 @@ def _upsert_symbols_to_db(symbols: list[str]) -> dict:
                     ON CONFLICT (symbol) DO UPDATE SET
                         is_active = TRUE,
                         last_synced_at = :now
-                    """,
+                    """),
                     {"symbol": sym, "now": now},
                 )
                 stats["inserted"] += 1
             elif not existing_map[sym]:
                 # رمز موجود لكن معطّل — أعد تفعيله
                 session.execute(
-                    """
+                    text("""
                     UPDATE market_data.symbols
                     SET is_active = TRUE, last_synced_at = :now
                     WHERE symbol = :symbol
-                    """,
+                    """),
                     {"symbol": sym, "now": now},
                 )
                 stats["reactivated"] += 1
             else:
                 # رمز موجود ونشط — حدّث وقت المزامنة فقط
                 session.execute(
-                    """
+                    text("""
                     UPDATE market_data.symbols
                     SET last_synced_at = :now
                     WHERE symbol = :symbol
-                    """,
+                    """),
                     {"symbol": sym, "now": now},
                 )
                 stats["unchanged"] += 1
@@ -207,11 +208,11 @@ def _upsert_symbols_to_db(symbols: list[str]) -> dict:
         if stale_symbols:
             for sym in stale_symbols:
                 session.execute(
-                    """
+                    text("""
                     UPDATE market_data.symbols
                     SET is_active = FALSE, last_synced_at = :now
                     WHERE symbol = :symbol AND market = 'TASI'
-                    """,
+                    """),
                     {"symbol": sym, "now": now},
                 )
                 stats["deactivated"] += 1
