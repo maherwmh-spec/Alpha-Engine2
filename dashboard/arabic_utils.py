@@ -1,33 +1,35 @@
 """
 dashboard/arabic_utils.py
 =========================
-FIX #2: وحدة مساعدة لمعالجة وعرض النصوص العربية بشكل صحيح.
+وحدة مساعدة لعرض النصوص العربية بشكل صحيح في Streamlit وPlotly.
 
-المشكلة: النصوص العربية تظهر مقلوبة أو غير صحيحة في الواجهات الرسومية
-(Streamlit, Plotly) بسبب مشاكل في اتجاه النص (RTL) وتشكيل الحروف.
+المشكلة: النصوص العربية تظهر مقلوبة أو غير متصلة الحروف في الواجهات الرسومية
+بسبب مشاكل في اتجاه النص (RTL) وتشكيل الحروف.
 
-الحل:
-- arabic_reshaper: يُعيد تشكيل الحروف العربية وربطها بشكل صحيح
-- python-bidi: يُطبّق خوارزمية Unicode Bidirectional Algorithm لضمان
-  عرض النص من اليمين إلى اليسار بشكل صحيح
+الحل المطبّق:
+  1. arabic_reshaper  → يُعيد تشكيل الحروف العربية وربطها بشكل صحيح
+  2. python-bidi      → يُطبّق خوارزمية Unicode Bidirectional (RTL)
 
 الاستخدام:
-    from dashboard.arabic_utils import fix_arabic, fix_arabic_df, arabic_plotly_layout
+    from dashboard.arabic_utils import fix_arabic, fix_arabic_series, arabic_plotly_layout
 
     # نص مفرد
-    text = fix_arabic("البنوك والخدمات المالية")
+    label = fix_arabic("البنوك والخدمات المالية")
 
-    # عمود في DataFrame
-    df["sector"] = fix_arabic_df(df["sector"])
+    # عمود DataFrame
+    df["sector"] = fix_arabic_series(df["sector"])
 
-    # تخطيط Plotly مع دعم العربية
+    # أعمدة متعددة في DataFrame
+    df = fix_arabic_df_columns(df, ["sector_name", "company_name"])
+
+    # تخطيط Plotly مع RTL
     fig.update_layout(**arabic_plotly_layout(title="عنوان الرسم"))
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Optional, Union
+from typing import List, Optional
 
 import pandas as pd
 
@@ -39,12 +41,11 @@ try:
     import arabic_reshaper
     from bidi.algorithm import get_display
     _ARABIC_SUPPORT = True
-    logger.info("✅ Arabic text rendering libraries loaded (arabic_reshaper + python-bidi)")
-except ImportError:
+    logger.info("✅ Arabic rendering libraries loaded (arabic_reshaper + python-bidi)")
+except ImportError as _e:
     _ARABIC_SUPPORT = False
     logger.warning(
-        "⚠️ arabic_reshaper or python-bidi not installed. "
-        "Arabic text may display incorrectly. "
+        f"⚠️ Arabic libraries not available ({_e}). "
         "Install with: pip install arabic-reshaper python-bidi"
     )
 
@@ -53,28 +54,27 @@ except ImportError:
 
 def fix_arabic(text: Optional[str]) -> str:
     """
-    يُصلح عرض النص العربي بتطبيق:
-    1. arabic_reshaper: إعادة تشكيل الحروف وربطها
-    2. python-bidi: تطبيق خوارزمية RTL
+    يُصلح عرض النص العربي بتطبيق reshape + bidi.
 
     Args:
-        text: النص العربي المراد إصلاحه
+        text: النص العربي المراد إصلاحه (أو None)
 
     Returns:
-        النص بعد الإصلاح، أو النص الأصلي إذا لم تكن المكتبات متاحة
+        النص المُصلَح جاهزاً للعرض، أو النص الأصلي إذا لم تكن المكتبات متاحة.
+
+    مثال:
+        >>> fix_arabic("الخدمات المالية")
+        'ةيلاملا تامدخلا'   # (مُعاد ترتيبه لـ RTL)
     """
     if not text or not isinstance(text, str):
         return text or ""
-
     if not _ARABIC_SUPPORT:
         return text
-
     try:
         reshaped = arabic_reshaper.reshape(text)
-        display_text = get_display(reshaped)
-        return display_text
+        return get_display(reshaped)
     except Exception as e:
-        logger.debug(f"Arabic reshaping failed for '{text[:30]}': {e}")
+        logger.debug(f"Arabic reshaping failed for '{text[:40]}': {e}")
         return text
 
 
@@ -86,19 +86,20 @@ def fix_arabic_series(series: pd.Series) -> pd.Series:
         series: عمود يحتوي على نصوص عربية
 
     Returns:
-        العمود بعد إصلاح النصوص
+        العمود بعد إصلاح جميع النصوص
     """
     if not _ARABIC_SUPPORT:
         return series
-
     try:
-        return series.apply(lambda x: fix_arabic(str(x)) if pd.notna(x) else x)
+        return series.apply(
+            lambda x: fix_arabic(str(x)) if pd.notna(x) and x != "" else (x or "")
+        )
     except Exception as e:
         logger.debug(f"Arabic series reshaping failed: {e}")
         return series
 
 
-def fix_arabic_df_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+def fix_arabic_df_columns(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
     """
     يُصلح عرض النصوص العربية في أعمدة محددة من DataFrame.
 
@@ -107,11 +108,10 @@ def fix_arabic_df_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
         columns: قائمة أسماء الأعمدة التي تحتوي على نصوص عربية
 
     Returns:
-        الـ DataFrame بعد إصلاح النصوص في الأعمدة المحددة
+        نسخة من الـ DataFrame بعد إصلاح النصوص في الأعمدة المحددة
     """
-    if not _ARABIC_SUPPORT or df.empty:
+    if not _ARABIC_SUPPORT or df is None or df.empty:
         return df
-
     df = df.copy()
     for col in columns:
         if col in df.columns:
@@ -126,38 +126,64 @@ def arabic_plotly_layout(
     **kwargs
 ) -> dict:
     """
-    يُنشئ معاملات تخطيط Plotly مع دعم كامل للعربية (RTL).
+    يُنشئ معاملات تخطيط Plotly مع دعم كامل للعربية (RTL + خط مناسب).
 
     Args:
-        title: عنوان الرسم البياني
+        title: عنوان الرسم البياني (سيُعالَج تلقائياً)
         xaxis_title: عنوان المحور الأفقي
         yaxis_title: عنوان المحور الرأسي
-        **kwargs: معاملات إضافية لـ update_layout
+        **kwargs: معاملات إضافية تُمرَّر مباشرة إلى update_layout
 
     Returns:
         dict يمكن تمريره مباشرة إلى fig.update_layout(**...)
+
+    مثال:
+        fig.update_layout(**arabic_plotly_layout(
+            title="توزيع الأسهم",
+            xaxis_title="القطاع",
+            yaxis_title="العدد"
+        ))
     """
-    layout = {
+    layout: dict = {
         "font": {
-            "family": "Arial, Tahoma, sans-serif",
+            "family": "Tahoma, Arial, 'Segoe UI', sans-serif",
+            "size": 13,
         },
+        "paper_bgcolor": "rgba(0,0,0,0)",
+        "plot_bgcolor":  "rgba(0,0,0,0)",
         **kwargs,
     }
 
     if title:
         layout["title"] = {
-            "text": fix_arabic(title),
-            "x": 0.5,
+            "text":    fix_arabic(title),
+            "x":       0.5,
             "xanchor": "center",
+            "font":    {"size": 16},
         }
 
     if xaxis_title:
-        layout["xaxis_title"] = fix_arabic(xaxis_title)
+        layout["xaxis"] = layout.get("xaxis", {})
+        layout["xaxis"]["title"] = fix_arabic(xaxis_title)
 
     if yaxis_title:
-        layout["yaxis_title"] = fix_arabic(yaxis_title)
+        layout["yaxis"] = layout.get("yaxis", {})
+        layout["yaxis"]["title"] = fix_arabic(yaxis_title)
 
     return layout
+
+
+def fix_arabic_list(items: List[str]) -> List[str]:
+    """
+    يُصلح عرض النصوص العربية في قائمة Python.
+
+    Args:
+        items: قائمة تحتوي على نصوص عربية
+
+    Returns:
+        القائمة بعد إصلاح جميع النصوص
+    """
+    return [fix_arabic(item) for item in items]
 
 
 def is_arabic_supported() -> bool:
@@ -166,7 +192,10 @@ def is_arabic_supported() -> bool:
 
 
 def get_support_status() -> str:
-    """يُعيد رسالة حالة دعم العربية."""
+    """يُعيد رسالة حالة دعم العربية للعرض في الواجهة."""
     if _ARABIC_SUPPORT:
         return "✅ دعم العربية مفعّل (arabic_reshaper + python-bidi)"
-    return "⚠️ دعم العربية غير مفعّل — قم بتثبيت: pip install arabic-reshaper python-bidi"
+    return (
+        "⚠️ دعم العربية غير مفعّل\n"
+        "قم بتثبيت: pip install arabic-reshaper python-bidi"
+    )

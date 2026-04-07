@@ -1,51 +1,49 @@
 """
 Alpha-Engine2 Dashboard
-Real-time monitoring dashboard built with Streamlit.
+=======================
+لوحة مراقبة لحظية مبنية بـ Streamlit.
 
-FIX #2: Arabic text rendering using arabic_reshaper + python-bidi
-FIX #3: Stock selector now reads from market_data.symbols WHERE is_active = TRUE
-         instead of DISTINCT from market_data.ohlcv (which only showed 87 symbols)
+الإصلاحات المطبّقة:
+  FIX #2: عرض اللغة العربية — جميع النصوص تمر عبر fix_arabic() قبل العرض
+  FIX #3: استعلام الأسهم — يقرأ من market_data.symbols WHERE is_active=TRUE
 """
 # -*- coding: utf-8 -*-
 import os
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import pandas as pd
-import plotly.graph_objects as go
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 from sqlalchemy import create_engine, text
 
-# ── FIX #2: تهيئة دعم العربية ─────────────────────────────────────────────────
-# إضافة مسار المشروع لضمان استيراد arabic_utils
+# ── إضافة مسار المشروع ────────────────────────────────────────────────────────
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# ── FIX #2: استيراد وحدة العربية ──────────────────────────────────────────────
 try:
     from dashboard.arabic_utils import (
         fix_arabic,
         fix_arabic_series,
         fix_arabic_df_columns,
+        fix_arabic_list,
         arabic_plotly_layout,
         get_support_status,
     )
-    _ARABIC_UTILS_LOADED = True
+    _ARABIC_OK = True
 except ImportError:
-    # fallback إذا لم تُحمَّل الوحدة
-    def fix_arabic(text):
-        return text or ""
-    def fix_arabic_series(series):
-        return series
-    def fix_arabic_df_columns(df, columns):
-        return df
-    def arabic_plotly_layout(**kwargs):
-        return kwargs
-    def get_support_status():
-        return "⚠️ arabic_utils not loaded"
-    _ARABIC_UTILS_LOADED = False
+    # Fallback: إذا لم تُحمَّل الوحدة لأي سبب
+    def fix_arabic(t):          return t or ""
+    def fix_arabic_series(s):   return s
+    def fix_arabic_df_columns(df, cols): return df
+    def fix_arabic_list(lst):   return lst
+    def arabic_plotly_layout(**kw): return kw
+    def get_support_status():   return "⚠️ arabic_utils not loaded"
+    _ARABIC_OK = False
 
-# ── Page config ────────────────────────────────────────────────────────────────
+# ── إعداد الصفحة ──────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Alpha-Engine2 Dashboard",
     page_icon="📈",
@@ -53,37 +51,62 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── FIX #2: CSS لدعم اتجاه RTL في الواجهة ─────────────────────────────────────
+# ── FIX #2: CSS شامل لدعم RTL وخط عربي مناسب ────────────────────────────────
 st.markdown("""
 <style>
-    /* دعم RTL للنصوص العربية */
-    .stMarkdown, .stText, .stDataFrame, .stTable {
+    /* خط عربي واضح لجميع العناصر */
+    * {
+        font-family: 'Tahoma', 'Arial', 'Segoe UI', sans-serif !important;
+    }
+
+    /* RTL للنصوص العربية */
+    .stMarkdown p, .stMarkdown li, .stMarkdown h1,
+    .stMarkdown h2, .stMarkdown h3, .stMarkdown h4,
+    .stText, .stCaption {
         direction: rtl;
         text-align: right;
-        font-family: 'Tahoma', 'Arial', sans-serif;
     }
-    /* الحفاظ على اتجاه LTR للأرقام والرموز */
-    .stMetric label, .stMetric div[data-testid="metric-container"] {
-        direction: rtl;
-        text-align: right;
-    }
-    /* تحسين عرض الجداول */
-    .dataframe th, .dataframe td {
+
+    /* RTL للجداول */
+    .dataframe th, .dataframe td,
+    [data-testid="stDataFrame"] th,
+    [data-testid="stDataFrame"] td {
         text-align: right !important;
+        direction: rtl !important;
+    }
+
+    /* RTL للـ metrics */
+    [data-testid="metric-container"] label,
+    [data-testid="metric-container"] div {
         direction: rtl;
+        text-align: right;
+    }
+
+    /* RTL للـ selectbox و slider labels */
+    .stSelectbox label, .stSlider label,
+    .stCheckbox label, .stRadio label {
+        direction: rtl;
+        text-align: right;
+    }
+
+    /* تحسين عرض الـ sidebar */
+    [data-testid="stSidebar"] * {
+        direction: rtl;
+        text-align: right;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Database connection ────────────────────────────────────────────────────────
+# ── قاعدة البيانات ────────────────────────────────────────────────────────────
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
     "postgresql://alpha_user:alpha_password_2024@postgres:5432/alpha_engine"
 )
 
+
 @st.cache_resource
 def get_engine():
-    """إنشاء محرك قاعدة البيانات مع تفعيل UTF-8 صريحاً."""
+    """إنشاء محرك قاعدة البيانات مع UTF-8 وتوقيت السعودية."""
     return create_engine(
         DATABASE_URL,
         pool_pre_ping=True,
@@ -94,71 +117,91 @@ def get_engine():
 
 
 def run_query(sql: str, params: dict = None) -> pd.DataFrame:
-    """Execute a SQL query and return a DataFrame. Returns empty DF on error."""
+    """تنفيذ استعلام SQL وإعادة DataFrame. يُعيد DataFrame فارغاً عند الخطأ."""
     try:
         engine = get_engine()
         with engine.connect() as conn:
             result = conn.execute(text(sql), params or {})
             return pd.DataFrame(result.fetchall(), columns=result.keys())
     except Exception as e:
-        st.error(f"Database error: {e}")
+        st.error(f"خطأ في قاعدة البيانات: {e}")
         return pd.DataFrame()
 
 
-# ── Sidebar ────────────────────────────────────────────────────────────────────
+# ── الشريط الجانبي ────────────────────────────────────────────────────────────
 st.sidebar.title("⚙️ Alpha-Engine2")
 st.sidebar.markdown("---")
-page = st.sidebar.selectbox(
-    "الصفحة",
-    ["📊 نظرة عامة", "📈 بيانات السوق", "🤖 حالة الخدمات", "📡 الإشارات", "📉 الأداء"]
+
+# FIX #2: أسماء الصفحات تمر عبر fix_arabic في format_func
+PAGES = {
+    "📊 نظرة عامة":    "overview",
+    "📈 بيانات السوق": "market",
+    "🤖 حالة الخدمات": "bots",
+    "📡 الإشارات":     "signals",
+    "📉 الأداء":       "performance",
+}
+page_label = st.sidebar.selectbox(
+    fix_arabic("الصفحة"),
+    list(PAGES.keys()),
+    format_func=fix_arabic,
 )
+page = PAGES[page_label]
+
 st.sidebar.markdown("---")
-auto_refresh = st.sidebar.checkbox("تحديث تلقائي (30 ث)", value=False)
+auto_refresh = st.sidebar.checkbox(fix_arabic("تحديث تلقائي (30 ث)"), value=False)
 if auto_refresh:
     time.sleep(30)
     st.rerun()
 
-# ── FIX #2: عرض حالة دعم العربية في الشريط الجانبي ───────────────────────────
-with st.sidebar.expander("🌐 حالة النظام", expanded=False):
+# حالة دعم العربية
+with st.sidebar.expander(fix_arabic("🌐 حالة النظام"), expanded=False):
     st.caption(get_support_status())
-    st.caption(f"التوقيت: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    st.caption(f"{fix_arabic('التوقيت')}: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 
-# ── Page: Overview ─────────────────────────────────────────────────────────────
-if page == "📊 نظرة عامة":
-    st.title("📊 نظرة عامة — Alpha-Engine2")
-    st.caption(f"آخر تحديث: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+# ══════════════════════════════════════════════════════════════════════════════
+# صفحة: نظرة عامة
+# ══════════════════════════════════════════════════════════════════════════════
+if page == "overview":
+    st.title(fix_arabic("📊 نظرة عامة — Alpha-Engine2"))
+    st.caption(f"{fix_arabic('آخر تحديث')}: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     col1, col2, col3, col4 = st.columns(4)
 
-    # FIX #3: عدد الأسهم النشطة من جدول symbols (وليس من ohlcv)
+    # FIX #3: عدد الأسهم من جدول symbols (وليس ohlcv)
     df_sym = run_query(
         "SELECT COUNT(*) AS cnt FROM market_data.symbols WHERE is_active = TRUE"
     )
     col1.metric(
-        "الأسهم النشطة",
+        fix_arabic("الأسهم النشطة"),
         int(df_sym["cnt"].iloc[0]) if not df_sym.empty else 0
     )
 
-    # Total candles
     df_candles = run_query("SELECT COUNT(*) AS cnt FROM market_data.ohlcv")
-    col2.metric("إجمالي الشموع", f"{int(df_candles['cnt'].iloc[0]):,}" if not df_candles.empty else 0)
+    col2.metric(
+        fix_arabic("إجمالي الشموع"),
+        f"{int(df_candles['cnt'].iloc[0]):,}" if not df_candles.empty else 0
+    )
 
-    # Signals today
     df_sig = run_query(
         "SELECT COUNT(*) AS cnt FROM strategies.signals WHERE timestamp >= CURRENT_DATE"
     )
-    col3.metric("إشارات اليوم", int(df_sig["cnt"].iloc[0]) if not df_sig.empty else 0)
+    col3.metric(
+        fix_arabic("إشارات اليوم"),
+        int(df_sig["cnt"].iloc[0]) if not df_sig.empty else 0
+    )
 
-    # Latest candle time
     df_latest = run_query("SELECT MAX(time) AS latest FROM market_data.ohlcv")
-    latest_time = df_latest["latest"].iloc[0] if not df_latest.empty else "—"
-    col4.metric("آخر بيانات", str(latest_time)[:16] if latest_time else "—")
+    latest_time = df_latest["latest"].iloc[0] if not df_latest.empty else None
+    col4.metric(
+        fix_arabic("آخر بيانات"),
+        str(latest_time)[:16] if latest_time else "—"
+    )
 
     st.markdown("---")
 
-    # ── إحصائيات الأسهم حسب القطاع ────────────────────────────────────────────
-    st.subheader("📊 توزيع الأسهم حسب القطاع")
+    # ── توزيع الأسهم حسب القطاع ───────────────────────────────────────────────
+    st.subheader(fix_arabic("📊 توزيع الأسهم حسب القطاع"))
     df_sectors = run_query("""
         SELECT
             COALESCE(sector_name_ar, 'غير محدد') AS sector_name,
@@ -171,7 +214,7 @@ if page == "📊 نظرة عامة":
     """)
 
     if not df_sectors.empty:
-        # FIX #2: إصلاح عرض أسماء القطاعات العربية
+        # FIX #2: إصلاح أسماء القطاعات العربية
         df_sectors["sector_name"] = fix_arabic_series(df_sectors["sector_name"])
 
         fig_sectors = px.bar(
@@ -179,25 +222,24 @@ if page == "📊 نظرة عامة":
             x="symbol_count",
             y="sector_name",
             orientation="h",
-            title=fix_arabic("توزيع الأسهم حسب القطاع"),
-            labels={
-                "symbol_count": fix_arabic("عدد الأسهم"),
-                "sector_name": fix_arabic("القطاع")
-            }
         )
         fig_sectors.update_layout(
             height=500,
             yaxis={"autorange": "reversed"},
-            **arabic_plotly_layout()
+            **arabic_plotly_layout(
+                title="توزيع الأسهم حسب القطاع",
+                xaxis_title="عدد الأسهم",
+                yaxis_title="القطاع",
+            )
         )
         st.plotly_chart(fig_sectors, use_container_width=True)
     else:
-        st.info("لا توجد بيانات قطاعات بعد.")
+        st.info(fix_arabic("لا توجد بيانات قطاعات بعد."))
 
     st.markdown("---")
 
-    # Recent signals table
-    st.subheader("📡 آخر الإشارات")
+    # ── آخر الإشارات ──────────────────────────────────────────────────────────
+    st.subheader(fix_arabic("📡 آخر الإشارات"))
     df_recent = run_query("""
         SELECT timestamp, symbol, strategy_name, signal_type, confidence, price
         FROM strategies.signals
@@ -205,25 +247,35 @@ if page == "📊 نظرة عامة":
         LIMIT 20
     """)
     if df_recent.empty:
-        st.info("لا توجد إشارات بعد.")
+        st.info(fix_arabic("لا توجد إشارات بعد."))
     else:
+        # FIX #2: إصلاح أسماء الاستراتيجيات إذا كانت عربية
+        if "strategy_name" in df_recent.columns:
+            df_recent["strategy_name"] = fix_arabic_series(df_recent["strategy_name"])
         st.dataframe(df_recent, use_container_width=True)
 
-    # Bot status
-    st.subheader("🤖 حالة الخدمات")
-    df_bots = run_query("SELECT bot_name, status, last_run, error_message FROM bots.status ORDER BY bot_name")
+    # ── حالة الخدمات ──────────────────────────────────────────────────────────
+    st.subheader(fix_arabic("🤖 حالة الخدمات"))
+    df_bots = run_query(
+        "SELECT bot_name, status, last_run, error_message FROM bots.status ORDER BY bot_name"
+    )
     if df_bots.empty:
-        st.info("لا توجد بيانات حالة.")
+        st.info(fix_arabic("لا توجد بيانات حالة."))
     else:
+        # FIX #2: إصلاح أسماء الخدمات
+        if "bot_name" in df_bots.columns:
+            df_bots["bot_name"] = fix_arabic_series(df_bots["bot_name"])
         st.dataframe(df_bots, use_container_width=True)
 
 
-# ── Page: Market Data ──────────────────────────────────────────────────────────
-elif page == "📈 بيانات السوق":
-    st.title("📈 بيانات السوق")
+# ══════════════════════════════════════════════════════════════════════════════
+# صفحة: بيانات السوق
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "market":
+    st.title(fix_arabic("📈 بيانات السوق"))
 
-    # FIX #3: جلب الأسهم من market_data.symbols WHERE is_active = TRUE
-    # بدلاً من DISTINCT من market_data.ohlcv (الذي يعرض 87 سهماً فقط)
+    # FIX #3: جلب الأسهم من market_data.symbols WHERE is_active=TRUE
+    # بدلاً من DISTINCT من market_data.ohlcv (الذي يُظهر 87 سهماً فقط)
     df_symbols = run_query("""
         SELECT
             s.symbol,
@@ -234,19 +286,19 @@ elif page == "📈 بيانات السوق":
         ORDER BY s.symbol
     """)
 
+    # Fallback إذا كان جدول symbols فارغاً
     if df_symbols.empty:
-        # Fallback: استخدام OHLCV إذا كان جدول symbols فارغاً
         df_symbols = run_query(
-            "SELECT DISTINCT symbol, symbol AS display_name FROM market_data.ohlcv ORDER BY symbol"
+            "SELECT DISTINCT symbol, symbol AS display_name "
+            "FROM market_data.ohlcv ORDER BY symbol"
         )
 
     if df_symbols.empty:
-        st.warning("لا توجد بيانات في قاعدة البيانات بعد.")
+        st.warning(fix_arabic("لا توجد بيانات في قاعدة البيانات بعد."))
     else:
-        # FIX #2: إصلاح عرض أسماء الأسهم العربية
+        # FIX #2: إصلاح أسماء الأسهم العربية
         df_symbols["display_name"] = fix_arabic_series(df_symbols["display_name"])
 
-        # إنشاء قائمة العرض: "رمز — اسم"
         symbol_options = df_symbols["symbol"].tolist()
         symbol_display = {
             row["symbol"]: f"{row['symbol']} — {row['display_name']}"
@@ -255,11 +307,14 @@ elif page == "📈 بيانات السوق":
 
         col1, col2 = st.columns([2, 1])
         selected_symbol = col1.selectbox(
-            f"اختر السهم ({len(symbol_options)} سهم نشط)",
+            fix_arabic(f"اختر السهم ({len(symbol_options)} سهم نشط)"),
             symbol_options,
             format_func=lambda x: symbol_display.get(x, x)
         )
-        timeframe = col2.selectbox("الإطار الزمني", ["1d", "1h", "30m", "15m", "5m", "1m"])
+        timeframe = col2.selectbox(
+            fix_arabic("الإطار الزمني"),
+            ["1d", "1h", "30m", "15m", "5m", "1m"]
+        )
 
         df_ohlcv = run_query(
             """
@@ -273,10 +328,11 @@ elif page == "📈 بيانات السوق":
         )
 
         if df_ohlcv.empty:
-            st.info(f"لا توجد بيانات لـ {selected_symbol} بإطار {timeframe}")
+            st.info(fix_arabic(f"لا توجد بيانات لـ {selected_symbol} بإطار {timeframe}"))
         else:
             df_ohlcv = df_ohlcv.sort_values("time")
 
+            # رسم الشموع اليابانية
             fig = go.Figure(data=[go.Candlestick(
                 x=df_ohlcv["time"],
                 open=df_ohlcv["open"],
@@ -286,30 +342,33 @@ elif page == "📈 بيانات السوق":
                 name=selected_symbol
             )])
             fig.update_layout(
-                title=f"{selected_symbol} — {timeframe}",
-                xaxis_title=fix_arabic("التاريخ"),
-                yaxis_title=fix_arabic("السعر"),
                 height=500,
                 xaxis_rangeslider_visible=False,
-                **arabic_plotly_layout()
+                **arabic_plotly_layout(
+                    title=f"{selected_symbol} — {timeframe}",
+                    xaxis_title="التاريخ",
+                    yaxis_title="السعر",
+                )
             )
             st.plotly_chart(fig, use_container_width=True)
 
-            # Volume chart
-            fig_vol = px.bar(
-                df_ohlcv, x="time", y="volume",
-                title=fix_arabic("الحجم")
+            # رسم الحجم
+            fig_vol = px.bar(df_ohlcv, x="time", y="volume")
+            fig_vol.update_layout(
+                height=200,
+                **arabic_plotly_layout(title="الحجم", xaxis_title="التاريخ", yaxis_title="الحجم")
             )
-            fig_vol.update_layout(height=200)
             st.plotly_chart(fig_vol, use_container_width=True)
 
-            st.subheader("البيانات الخام")
+            st.subheader(fix_arabic("البيانات الخام"))
             st.dataframe(df_ohlcv.tail(50), use_container_width=True)
 
 
-# ── Page: Bot Status ───────────────────────────────────────────────────────────
-elif page == "🤖 حالة الخدمات":
-    st.title("🤖 حالة الخدمات")
+# ══════════════════════════════════════════════════════════════════════════════
+# صفحة: حالة الخدمات
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "bots":
+    st.title(fix_arabic("🤖 حالة الخدمات"))
 
     df_bots = run_query("""
         SELECT bot_name, status, last_run, error_message
@@ -318,55 +377,78 @@ elif page == "🤖 حالة الخدمات":
     """)
 
     if df_bots.empty:
-        st.info("لا توجد بيانات حالة. تأكد من تشغيل الخدمات.")
+        st.info(fix_arabic("لا توجد بيانات حالة. تأكد من تشغيل الخدمات."))
     else:
         for _, row in df_bots.iterrows():
-            status_icon = "✅" if row["status"] == "running" else "❌" if row["status"] == "error" else "⏸️"
-            with st.expander(f"{status_icon} {row['bot_name']} — {row['status']}"):
-                st.write(f"**آخر تشغيل:** {row['last_run']}")
+            status = row["status"]
+            icon = "✅" if status == "running" else "❌" if status == "error" else "⏸️"
+            bot_name = fix_arabic(str(row["bot_name"]))
+            with st.expander(f"{icon} {bot_name} — {status}"):
+                col1, col2 = st.columns(2)
+                col1.write(f"**{fix_arabic('الحالة')}:** {status}")
+                col2.write(f"**{fix_arabic('آخر تشغيل')}:** {row['last_run']}")
                 if row["error_message"]:
-                    st.error(f"الخطأ: {row['error_message']}")
+                    st.error(f"{fix_arabic('الخطأ')}: {row['error_message']}")
 
 
-# ── Page: Signals ──────────────────────────────────────────────────────────────
-elif page == "📡 الإشارات":
-    st.title("📡 الإشارات")
+# ══════════════════════════════════════════════════════════════════════════════
+# صفحة: الإشارات
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "signals":
+    st.title(fix_arabic("📡 الإشارات"))
 
     col1, col2, col3 = st.columns(3)
-    days_back = col1.slider("عدد الأيام", 1, 30, 7)
-    signal_type = col2.selectbox("نوع الإشارة", ["الكل", "BUY", "SELL", "HOLD"])
-    min_confidence = col3.slider("الحد الأدنى للثقة", 0.0, 1.0, 0.5)
+    days_back      = col1.slider(fix_arabic("عدد الأيام"), 1, 30, 7)
+    signal_type    = col2.selectbox(
+        fix_arabic("نوع الإشارة"),
+        [fix_arabic("الكل"), "BUY", "SELL", "HOLD"]
+    )
+    min_confidence = col3.slider(fix_arabic("الحد الأدنى للثقة"), 0.0, 1.0, 0.5)
 
-    # Use proper interval syntax
-    df_signals = run_query(
-        f"""
+    # بناء الاستعلام
+    sig_filter = ""
+    if signal_type != fix_arabic("الكل"):
+        sig_filter = f"AND signal_type = '{signal_type}'"
+
+    df_signals = run_query(f"""
         SELECT timestamp, symbol, strategy_name, signal_type, confidence, price
         FROM strategies.signals
         WHERE timestamp >= NOW() - INTERVAL '{days_back} days'
           AND confidence >= {min_confidence}
-        {"AND signal_type = '" + signal_type + "'" if signal_type != 'الكل' else ''}
+          {sig_filter}
         ORDER BY timestamp DESC
         LIMIT 500
-        """
-    )
+    """)
 
     if df_signals.empty:
-        st.info("لا توجد إشارات بالمعايير المحددة.")
+        st.info(fix_arabic("لا توجد إشارات بالمعايير المحددة."))
     else:
-        st.metric("عدد الإشارات", len(df_signals))
+        st.metric(fix_arabic("عدد الإشارات"), len(df_signals))
+
+        # FIX #2: إصلاح أسماء الاستراتيجيات
+        if "strategy_name" in df_signals.columns:
+            df_signals["strategy_name"] = fix_arabic_series(df_signals["strategy_name"])
         st.dataframe(df_signals, use_container_width=True)
 
-        # Distribution chart
+        # رسم توزيع الإشارات
         fig = px.histogram(
             df_signals, x="signal_type", color="signal_type",
-            title=fix_arabic("توزيع الإشارات حسب النوع")
+        )
+        fig.update_layout(
+            **arabic_plotly_layout(
+                title="توزيع الإشارات حسب النوع",
+                xaxis_title="نوع الإشارة",
+                yaxis_title="العدد",
+            )
         )
         st.plotly_chart(fig, use_container_width=True)
 
 
-# ── Page: Performance ──────────────────────────────────────────────────────────
-elif page == "📉 الأداء":
-    st.title("📉 الأداء")
+# ══════════════════════════════════════════════════════════════════════════════
+# صفحة: الأداء
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "performance":
+    st.title(fix_arabic("📉 الأداء"))
 
     df_perf = run_query("""
         SELECT timestamp, strategy_name, symbol, pnl, pnl_pct
@@ -376,22 +458,32 @@ elif page == "📉 الأداء":
     """)
 
     if df_perf.empty:
-        st.info("لا توجد بيانات أداء بعد.")
+        st.info(fix_arabic("لا توجد بيانات أداء بعد."))
     else:
         col1, col2, col3 = st.columns(3)
-        total_pnl = df_perf["pnl"].sum()
+        total_pnl   = df_perf["pnl"].sum()
         avg_pnl_pct = df_perf["pnl_pct"].mean()
-        win_rate = (df_perf["pnl"] > 0).mean() * 100
+        win_rate    = (df_perf["pnl"] > 0).mean() * 100
 
-        col1.metric("إجمالي الربح/الخسارة", f"{total_pnl:,.2f}")
-        col2.metric("متوسط العائد %", f"{avg_pnl_pct:.2f}%")
-        col3.metric("نسبة الفوز", f"{win_rate:.1f}%")
+        col1.metric(fix_arabic("إجمالي الربح/الخسارة"), f"{total_pnl:,.2f}")
+        col2.metric(fix_arabic("متوسط العائد %"),        f"{avg_pnl_pct:.2f}%")
+        col3.metric(fix_arabic("نسبة الفوز"),            f"{win_rate:.1f}%")
+
+        # FIX #2: إصلاح أسماء الاستراتيجيات
+        if "strategy_name" in df_perf.columns:
+            df_perf["strategy_name"] = fix_arabic_series(df_perf["strategy_name"])
 
         fig = px.line(
             df_perf.sort_values("timestamp"),
             x="timestamp", y="pnl",
             color="strategy_name",
-            title=fix_arabic("منحنى الأداء")
+        )
+        fig.update_layout(
+            **arabic_plotly_layout(
+                title="منحنى الأداء",
+                xaxis_title="التاريخ",
+                yaxis_title="الربح / الخسارة",
+            )
         )
         st.plotly_chart(fig, use_container_width=True)
 
