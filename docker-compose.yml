@@ -14,6 +14,7 @@ services:
       POSTGRES_DB: alpha_engine
       PGDATA: /var/lib/postgresql/data/pgdata
       TZ: Asia/Riyadh
+      PGTZ: Asia/Riyadh
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/01_init.sql
