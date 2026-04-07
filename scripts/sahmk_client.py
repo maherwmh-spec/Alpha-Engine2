@@ -472,12 +472,58 @@ class SahmkClient:
         '90030',  # المرافق
     ]
 
+    def _get_active_symbols_from_db(self) -> List[str]:
+        """
+        FIX #1: جلب جميع الأسهم النشطة من جدول market_data.symbols.
+        هذا يضمن الاشتراك بجميع الأسهم النشطة (is_active=true) وليس 10 أسهم فقط.
+
+        Returns:
+            قائمة بجميع رموز تاسي النشطة من قاعدة البيانات
+        """
+        try:
+            import os
+            import psycopg2
+
+            dsn = os.environ.get(
+                "DATABASE_URL",
+                "postgresql://alpha_user:alpha_password_2024@postgres:5432/alpha_engine"
+            )
+            conn = psycopg2.connect(dsn)
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT symbol
+                FROM market_data.symbols
+                WHERE is_active = TRUE
+                  AND market = 'TASI'
+                ORDER BY symbol
+            """)
+            rows = cur.fetchall()
+            cur.close()
+            conn.close()
+
+            db_symbols = [row[0] for row in rows if is_tasi_or_sector(row[0])]
+            self.logger.success(
+                f"✅ [DB] Loaded {len(db_symbols)} active TASI symbols from market_data.symbols"
+            )
+            return db_symbols
+
+        except Exception as e:
+            self.logger.warning(
+                f"⚠️ Could not load symbols from DB: {e} — will fallback to API"
+            )
+            return []
+
     def get_symbols_list(self) -> List[str]:
         """Fetch list of TASI main-market symbols + sector/index symbols.
 
-        فلتر الرموز باستخدام is_tasi_or_sector():
-        - مسموح: أسهم تاسي (4 أرقام، يبدأ بـ 1-8) + قطاعات 900xx
-        - مستبعد: أسهم نمو/ETFs (4 أرقام تبدأ بـ 9، ليس 900)
+        FIX #1: يقرأ أولاً من market_data.symbols (is_active=true) لضمان
+        الاشتراك بجميع الأسهم النشطة وليس 10 أسهم فقط.
+
+        الأولوية:
+        1. Redis cache (إذا كان موجوداً وحديثاً)
+        2. قاعدة البيانات market_data.symbols (is_active=true) ← المصدر الرئيسي
+        3. Sahmk REST API (fallback)
+        4. القائمة الثابتة (fallback أخير)
         """
         try:
             self.logger.info("📋 Fetching TASI symbols list (stocks + sectors + index)")
@@ -488,7 +534,32 @@ class SahmkClient:
                 for s in self.SECTOR_SYMBOLS:
                     if s not in cached:
                         cached.append(s)
+                self.logger.info(
+                    f"📋 [Cache] Using {len(cached)} symbols from Redis cache"
+                )
                 return cached
+
+            # ── الأولوية 1: قراءة من قاعدة البيانات (المصدر الرئيسي) ──────────
+            db_symbols = self._get_active_symbols_from_db()
+            if db_symbols:
+                # إضافة القطاعات دائماً
+                symbols = db_symbols.copy()
+                for sector_sym in self.SECTOR_SYMBOLS:
+                    if sector_sym not in symbols:
+                        symbols.append(sector_sym)
+
+                tasi_count = sum(1 for s in symbols if len(s) == 4 and s[0] in '12345678')
+                self.logger.success(
+                    f"✅ [DB] Symbols list ready: {len(symbols)} total "
+                    f"({tasi_count} TASI stocks + {len(self.SECTOR_SYMBOLS)} sectors/index)"
+                )
+                redis_manager.set('sahmk:symbols_list', symbols, ttl=3600)
+                return symbols
+
+            # ── الأولوية 2: Sahmk REST API (fallback) ────────────────────────
+            self.logger.warning(
+                "⚠️ DB symbols empty — falling back to Sahmk REST API"
+            )
 
             # --- جلب كل الرموز من API ---
             all_symbols_data = self._make_request('GET', 'market/symbols/')
@@ -544,7 +615,7 @@ class SahmkClient:
             if symbols:
                 redis_manager.set('sahmk:symbols_list', symbols, ttl=3600)
                 self.logger.success(
-                    f"✅ Symbols list ready: {len(symbols)} total "
+                    f"✅ [API] Symbols list ready: {len(symbols)} total "
                     f"({tasi_count} TASI stocks + {len(self.SECTOR_SYMBOLS)} sectors/index)"
                 )
 
@@ -552,7 +623,11 @@ class SahmkClient:
 
         except Exception as e:
             self.logger.error(f"❌ Error fetching symbols list: {e}")
-            # fallback: رموز تاسي الأساسية فقط (بدون 9xx)
+            # ── الأولوية 3: القائمة الثابتة (fallback أخير) ──────────────────
+            self.logger.warning(
+                "⚠️ Using hardcoded fallback symbols list (10 symbols only) — "
+                "this is a last resort fallback, DB or API should be used normally"
+            )
             return [
                 "2222", "1120", "2010", "2350", "4200",
                 "1180", "2380", "3020", "1010", "4030"

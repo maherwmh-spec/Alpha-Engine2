@@ -1,5 +1,6 @@
 # Alpha-Engine2 — Docker Compose
 # NOTE: `version` key removed (obsolete in modern Docker Compose)
+# FIX #0: Added TZ=Asia/Riyadh to all services to enforce Saudi timezone (UTC+3)
 
 services:
 
@@ -12,6 +13,7 @@ services:
       POSTGRES_PASSWORD: alpha_password_2024
       POSTGRES_DB: alpha_engine
       PGDATA: /var/lib/postgresql/data/pgdata
+      TZ: Asia/Riyadh
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/01_init.sql
@@ -32,6 +34,8 @@ services:
     image: redis:7-alpine
     container_name: alpha_redis
     command: redis-server --appendonly yes --requirepass alpha_redis_password_2024
+    environment:
+      TZ: Asia/Riyadh
     volumes:
       - redis_data:/data
     ports:
@@ -56,6 +60,9 @@ services:
       - DATABASE_URL=postgresql://alpha_user:alpha_password_2024@postgres:5432/alpha_engine
       - REDIS_URL=redis://:alpha_redis_password_2024@redis:6379/0
       - PYTHONUNBUFFERED=1
+      - TZ=Asia/Riyadh
+      - PYTHONIOENCODING=utf-8
+      - LANG=ar_SA.UTF-8
     volumes:
       - ./:/app
       - ./data:/app/data
@@ -81,6 +88,9 @@ services:
       - DATABASE_URL=postgresql://alpha_user:alpha_password_2024@postgres:5432/alpha_engine
       - REDIS_URL=redis://:alpha_redis_password_2024@redis:6379/0
       - PYTHONUNBUFFERED=1
+      - TZ=Asia/Riyadh
+      - PYTHONIOENCODING=utf-8
+      - LANG=ar_SA.UTF-8
     volumes:
       - ./:/app
       - ./data:/app/data
@@ -106,6 +116,9 @@ services:
       - DATABASE_URL=postgresql://alpha_user:alpha_password_2024@postgres:5432/alpha_engine
       - REDIS_URL=redis://:alpha_redis_password_2024@redis:6379/0
       - PYTHONUNBUFFERED=1
+      - TZ=Asia/Riyadh
+      - PYTHONIOENCODING=utf-8
+      - LANG=ar_SA.UTF-8
     volumes:
       - ./:/app
       - ./data:/app/data
@@ -130,6 +143,8 @@ services:
     environment:
       - REDIS_URL=redis://:alpha_redis_password_2024@redis:6379/0
       - PYTHONUNBUFFERED=1
+      - TZ=Asia/Riyadh
+      - PYTHONIOENCODING=utf-8
     ports:
       - "5555:5555"
     depends_on:
@@ -150,6 +165,9 @@ services:
       - DATABASE_URL=postgresql://alpha_user:alpha_password_2024@postgres:5432/alpha_engine
       - REDIS_URL=redis://:alpha_redis_password_2024@redis:6379/0
       - PYTHONUNBUFFERED=1
+      - TZ=Asia/Riyadh
+      - PYTHONIOENCODING=utf-8
+      - LANG=ar_SA.UTF-8
     volumes:
       - ./:/app
       - ./data:/app/data
@@ -179,6 +197,9 @@ services:
       - DATABASE_URL=postgresql://alpha_user:alpha_password_2024@postgres:5432/alpha_engine
       - REDIS_URL=redis://:alpha_redis_password_2024@redis:6379/0
       - PYTHONUNBUFFERED=1
+      - TZ=Asia/Riyadh
+      - PYTHONIOENCODING=utf-8
+      - LANG=ar_SA.UTF-8
     ports:
       - "8501:8501"
     volumes:
@@ -205,6 +226,9 @@ services:
       - DATABASE_URL=postgresql://alpha_user:alpha_password_2024@postgres:5432/alpha_engine
       - REDIS_URL=redis://:alpha_redis_password_2024@redis:6379/0
       - PYTHONUNBUFFERED=1
+      - TZ=Asia/Riyadh
+      - PYTHONIOENCODING=utf-8
+      - LANG=ar_SA.UTF-8
     volumes:
       - ./:/app
       - ./data:/app/data
@@ -228,6 +252,8 @@ services:
       --config /freqtrade/user_data/config.json
       --strategy FreqAIStrategy
       --freqaimodel LightGBMClassifier
+    environment:
+      - TZ=Asia/Riyadh
     ports:
       - "8080:8080"
     volumes:

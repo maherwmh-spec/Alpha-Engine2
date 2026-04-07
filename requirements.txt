@@ -69,6 +69,10 @@ gradio==4.16.0
 plotly==5.18.0
 dash==2.14.2
 
+# Arabic Text Rendering (FIX #2: correct display of Arabic in dashboards)
+arabic-reshaper==3.0.0
+python-bidi==0.4.2
+
 # Scheduling
 apscheduler==3.10.4
 
