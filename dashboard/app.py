@@ -149,11 +149,11 @@ if page == "overview":
     st.subheader("📊 Symbols by Sector")
     df_sectors = run_query("""
         SELECT
-            COALESCE(name, sector_name, 'Unknown') AS sector_name,
+            COALESCE(name, sector_name_ar, 'Unknown') AS sector_name,
             COUNT(*) AS symbol_count
         FROM market_data.symbols
         WHERE is_active = TRUE AND market = 'TASI'
-        GROUP BY COALESCE(name, sector_name, 'Unknown')
+        GROUP BY COALESCE(name, sector_name_ar, 'Unknown')
         ORDER BY symbol_count DESC
         LIMIT 20
     """)
