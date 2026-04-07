@@ -28,9 +28,10 @@ Bot 2: Market Reporter - مُراسل السوق
 
 import asyncio
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
+import pytz
 import asyncpg
 import numpy as np
 import pandas as pd
@@ -47,6 +48,9 @@ from scripts.sector_calculator import (
     is_sector_symbol,
     SECTOR_DISPLAY_NAMES,
 )
+
+# --- Timezone ---
+_RIYADH_TZ = pytz.timezone('Asia/Riyadh')
 
 # --- Constants ---
 DB_POOL: Optional[asyncpg.Pool] = None
@@ -243,7 +247,7 @@ class MarketReporter:
                 DB_POOL = None
 
     async def _save_candle_to_db(self, candle: Dict):
-        """حفظ شمعة 1m في TimescaleDB."""
+        """Save a 1m candle to TimescaleDB with Asia/Riyadh timestamps."""
         if DB_POOL is None:
             return
 
@@ -251,10 +255,15 @@ class MarketReporter:
         if not is_tasi_or_sector(symbol):
             return
 
-        import pytz
+        # --- Timezone normalisation: always store as Asia/Riyadh ---
         ts = pd.to_datetime(candle['timestamp'])
         if ts.tzinfo is None:
-            ts = pytz.timezone('Asia/Riyadh').localize(ts)
+            # Naive timestamp: assume it is already local Riyadh time
+            # (WebSocket delivers wall-clock Riyadh time without tz info)
+            ts = _RIYADH_TZ.localize(ts)
+        else:
+            # Aware timestamp (e.g. UTC from some sources): convert to Riyadh
+            ts = ts.tz_convert(_RIYADH_TZ)
 
         source = candle.get('source') or (
             'db_sector_calculator' if is_sector_symbol(symbol) else 'sahmk_websocket'

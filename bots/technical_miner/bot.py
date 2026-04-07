@@ -6,10 +6,13 @@ Includes: Market Structure, Volume Profile, Fibonacci, Chart Patterns, and more
 
 import pandas as pd
 import numpy as np
+import pytz
 import ta
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from loguru import logger
+
+_RIYADH_TZ = pytz.timezone('Asia/Riyadh')
 
 from sqlalchemy import text
 from config.config_manager import config
@@ -402,16 +405,25 @@ class TechnicalMiner:
         return signals
     
     def _save_to_database(self, analysis: Dict):
-        """Save analysis to database"""
+        """Save analysis to database with Asia/Riyadh timestamps."""
         try:
-            # استخراج التوقيت: من حقل timestamp في analysis، أو الوقت الحالي
+            # Extract timestamp and ensure it is Asia/Riyadh-aware
             ts = analysis.get('timestamp')
             if ts is None:
-                ts = datetime.utcnow()
+                ts = datetime.now(tz=_RIYADH_TZ)
             elif hasattr(ts, 'to_pydatetime'):
                 ts = ts.to_pydatetime()
+                if ts.tzinfo is None:
+                    ts = _RIYADH_TZ.localize(ts)
+                else:
+                    ts = ts.astimezone(_RIYADH_TZ)
             elif not isinstance(ts, datetime):
-                ts = datetime.utcnow()
+                ts = datetime.now(tz=_RIYADH_TZ)
+            else:
+                if ts.tzinfo is None:
+                    ts = _RIYADH_TZ.localize(ts)
+                else:
+                    ts = ts.astimezone(_RIYADH_TZ)
 
             indicators = {
                 'rsi':         analysis.get('rsi'),
