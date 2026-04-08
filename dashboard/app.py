@@ -622,6 +622,7 @@ elif page == "sectors":
 
     # ── أداء القطاعات (90010-90030) ──────────────────────────────────────────
     st.subheader("🏭 Sector Performance (90010–90030)")
+    # الاستعلام الأول: من sector_performance — العمود هو 'name' (ليس name_ar)
     df_sectors = run_query("""
         SELECT symbol,
                COALESCE(name, symbol) AS name,
@@ -633,9 +634,10 @@ elif page == "sectors":
     """)
 
     if df_sectors.empty:
+        # الاستعلام الثاني (fallback): من ohlcv — العمود هو 'name' (ليس name_ar)
         df_sectors = run_query("""
             SELECT symbol,
-                   COALESCE(name_ar, name, symbol) AS name,
+                   COALESCE(name, symbol) AS name,
                    close, time
             FROM market_data.ohlcv
             WHERE symbol ~ '^900[1-3][0-9]$'
