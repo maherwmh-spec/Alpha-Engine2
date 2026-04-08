@@ -622,7 +622,6 @@ elif page == "sectors":
 
     # ── أداء القطاعات (90010-90030) ──────────────────────────────────────────
     st.subheader("🏭 Sector Performance (90010–90030)")
-    # الاستعلام الأول: من sector_performance — العمود هو 'name' (ليس name_ar)
     df_sectors = run_query("""
         SELECT symbol,
                COALESCE(name, symbol) AS name,
@@ -632,20 +631,6 @@ elif page == "sectors":
         ORDER BY time DESC, symbol
         LIMIT 200
     """)
-
-    if df_sectors.empty:
-        # الاستعلام الثاني (fallback): من ohlcv — العمود هو 'name' (ليس name_ar)
-        df_sectors = run_query("""
-            SELECT symbol,
-                   COALESCE(name, symbol) AS name,
-                   close, time
-            FROM market_data.ohlcv
-            WHERE symbol ~ '^900[1-3][0-9]$'
-              AND symbol::int BETWEEN 90010 AND 90030
-              AND timeframe = '1d'
-            ORDER BY time DESC, symbol
-            LIMIT 200
-        """)
 
     if not df_sectors.empty:
         df_latest = df_sectors.groupby("symbol").first().reset_index()
