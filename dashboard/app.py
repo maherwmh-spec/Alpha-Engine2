@@ -313,21 +313,23 @@ elif page == "genetic":
 
     st.markdown("---")
 
-    # ── أفضل 10 استراتيجيات ──────────────────────────────────────────────────
+    # ── أفضل 10 استراتيجيات ──────────────────────────────────────────
     st.subheader("🏆 Top 10 Elite Strategies")
     df_top = run_query("""
         SELECT
-            symbol,
-            profit_objective,
-            fitness_score,
-            total_profit_pct,
-            win_rate,
-            sharpe_ratio,
-            max_drawdown_pct,
-            created_at
-        FROM genetic.strategies
-        WHERE fitness_score > 0
-        ORDER BY fitness_score DESC
+            s.symbol,
+            s.profit_objective,
+            s.fitness_score,
+            COALESCE(p.total_profit_pct, 0.0)  AS total_profit_pct,
+            COALESCE(p.win_rate, 0.0)           AS win_rate,
+            COALESCE(p.sharpe_ratio, 0.0)       AS sharpe_ratio,
+            COALESCE(p.max_drawdown_pct, 0.0)   AS max_drawdown_pct,
+            s.created_at
+        FROM genetic.strategies s
+        LEFT JOIN genetic.performance p
+            ON s.strategy_hash = p.strategy_hash
+        WHERE s.fitness_score > 0
+        ORDER BY s.fitness_score DESC
         LIMIT 10
     """)
 
@@ -621,7 +623,9 @@ elif page == "sectors":
     # ── أداء القطاعات (90010-90030) ──────────────────────────────────────────
     st.subheader("🏭 Sector Performance (90010–90030)")
     df_sectors = run_query("""
-        SELECT symbol, name, close, time
+        SELECT symbol,
+               COALESCE(name, symbol) AS name,
+               close, time
         FROM market_data.sector_performance
         WHERE timeframe = '1d'
         ORDER BY time DESC, symbol
@@ -630,7 +634,9 @@ elif page == "sectors":
 
     if df_sectors.empty:
         df_sectors = run_query("""
-            SELECT symbol, name, close, time
+            SELECT symbol,
+                   COALESCE(name_ar, name, symbol) AS name,
+                   close, time
             FROM market_data.ohlcv
             WHERE symbol ~ '^900[1-3][0-9]$'
               AND symbol::int BETWEEN 90010 AND 90030

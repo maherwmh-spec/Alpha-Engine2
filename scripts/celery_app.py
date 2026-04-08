@@ -143,31 +143,34 @@ app.conf.beat_schedule = {
         'options': {'queue': 'normal'},
     },
 
-    # ── Genetic Engine (default queue) ───────────────────────────────────────
+    # ── Genetic Engine (default queue) ───────────────────────────────────────────────
     'scientist-run': {
         'task': 'bots.scientist.tasks.run_scientist',
         'schedule': 3600.0,
         'options': {'queue': 'default'},
     },
+    # المحرك الجيني: مرة واحدة يومياً الساعة 18:00 بتوقيت Asia/Riyadh
     'genetic-engine-run': {
         'task': 'bots.scientist.tasks.run_genetic_cycle',
-        'schedule': 14400.0,   # every 4 hours
+        'schedule': crontab(hour=18, minute=0),
         'options': {'queue': 'default'},
     },
 
-    # ── Low priority ─────────────────────────────────────────────────────────
+    # ── Low priority ─────────────────────────────────────────────────────
+    # المدرب الذاتي: مرة واحدة يومياً الساعة 02:00 بتوقيت Asia/Riyadh
     'self-trainer-run': {
         'task': 'bots.self_trainer.tasks.run_self_trainer',
         'schedule': crontab(hour=2, minute=0),
         'options': {'queue': 'low_priority'},
     },
+    # مدير FreqAI: مرة واحدة يومياً الساعة 03:00 بتوقيت Asia/Riyadh — طابور 'default'
     'freqai-manager-run': {
         'task': 'bots.freqai_manager.tasks.run_freqai_manager',
-        'schedule': 3600.0,
-        'options': {'queue': 'low_priority'},
+        'schedule': crontab(hour=3, minute=0),
+        'options': {'queue': 'default'},
     },
 
-    # ── Symbol Sync (daily) ──────────────────────────────────────────────────────────────
+    # ── Symbol Sync (daily) ────────────────────────────────────────────────────────────────────────────────────────────
     # يعمل يومياً الساعة 07:00 KSA (قبل فتح السوق بساعة)
     'sync-tasi-symbols': {
         'task': 'scripts.sync_symbols.sync_symbols_task',
