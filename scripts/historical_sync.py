@@ -150,9 +150,11 @@ async def save_historical_to_db(
     
     # تحديد الاسم
     if table_type == 'sector':
-        df_copy['name'] = SECTOR_NAMES.get(symbol, 'Unknown Sector')
+        df_copy['name_ar'] = SECTOR_NAMES.get(symbol, 'Unknown Sector')
+        df_copy['name_en'] = 'Unknown Sector'
     elif table_type == 'index':
-        df_copy['name'] = 'TASI' if symbol == '90001' else 'Unknown Index'
+        df_copy['name_ar'] = 'المؤشر العام تاسي' if symbol == '90001' else 'Unknown Index'
+        df_copy['name_en'] = 'TASI' if symbol == '90001' else 'Unknown Index'
     else:
         df_copy['name'] = SECTOR_NAMES.get(symbol) or df_copy.get('name', 'Unknown')
         if isinstance(df_copy['name'], pd.Series):
@@ -164,9 +166,12 @@ async def save_historical_to_db(
         df_copy['open_interest'] = df_copy.get('open_interest', 0).fillna(0).astype(int)
         df_copy['source'] = f'historical_sync_{timeframe}'
         cols = ['time', 'symbol', 'timeframe', 'name', 'open', 'high', 'low', 'close', 'volume', 'open_interest', 'source']
+    elif table_type == 'sector':
+        df_copy['source'] = 'local_import'
+        cols = ['time', 'symbol', 'name_ar', 'name_en', 'timeframe', 'open', 'high', 'low', 'close', 'volume', 'source']
     else:
         df_copy['source'] = 'local_import'
-        cols = ['time', 'symbol', 'name', 'timeframe', 'open', 'high', 'low', 'close', 'volume', 'source']
+        cols = ['time', 'symbol', 'name_ar', 'name_en', 'timeframe', 'open', 'high', 'low', 'close', 'volume', 'source']
 
     # التأكد من وجود جميع الأعمدة المطلوبة
     for c in cols:
@@ -196,8 +201,8 @@ async def save_historical_to_db(
             elif table_type == 'sector':
                 sql = """
                 INSERT INTO market_data.sector_performance
-                    (time, symbol, name, timeframe, open, high, low, close, volume, source)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                    (time, symbol, name_ar, name_en, timeframe, open, high, low, close, volume, source)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
                 ON CONFLICT (symbol, timeframe, time) DO UPDATE SET
                     open=EXCLUDED.open, high=EXCLUDED.high, low=EXCLUDED.low,
                     close=EXCLUDED.close, volume=EXCLUDED.volume, source=EXCLUDED.source;
@@ -205,8 +210,8 @@ async def save_historical_to_db(
             elif table_type == 'index':
                 sql = """
                 INSERT INTO market_data.index_performance
-                    (time, symbol, name, timeframe, open, high, low, close, volume, source)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                    (time, symbol, name_ar, name_en, timeframe, open, high, low, close, volume, source)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
                 ON CONFLICT (symbol, timeframe, time) DO UPDATE SET
                     open=EXCLUDED.open, high=EXCLUDED.high, low=EXCLUDED.low,
                     close=EXCLUDED.close, volume=EXCLUDED.volume, source=EXCLUDED.source;
@@ -242,6 +247,8 @@ async def import_local_data(pool: asyncpg.Pool, data_dir: str):
                 # افتراض أن ملفات ميتاستوك تم تصديرها كـ CSV أو يمكن قراءتها بـ pandas
                 # إذا كانت بصيغة ثنائية خاصة، ستحتاج لمكتبة خاصة. هنا نفترض CSV للتبسيط
                 df = pd.read_csv(file_path)
+                # تنظيف أسماء الأعمدة إذا كانت من MetaStock CSV
+                df.columns = df.columns.str.strip().str.replace('<', '').str.replace('>', '')
                 saved = await save_historical_to_db(pool, df, symbol, '1d', 'stock')
                 logger.info(f"  ✅ {symbol}: {saved} rows saved (Stock)")
                 total_saved += saved
@@ -269,6 +276,8 @@ async def import_local_data(pool: asyncpg.Pool, data_dir: str):
                 
             try:
                 df = pd.read_csv(file_path)
+                # تنظيف أسماء الأعمدة إذا كانت من MetaStock CSV
+                df.columns = df.columns.str.strip().str.replace('<', '').str.replace('>', '')
                 saved = await save_historical_to_db(pool, df, symbol, '1d', 'sector')
                 logger.info(f"  ✅ {english_name} ({symbol}): {saved} rows saved (Sector)")
                 total_saved += saved
@@ -284,6 +293,8 @@ async def import_local_data(pool: asyncpg.Pool, data_dir: str):
             symbol = '90001' if 'tasi' in file_path.stem.lower() else file_path.stem
             try:
                 df = pd.read_csv(file_path)
+                # تنظيف أسماء الأعمدة إذا كانت من MetaStock CSV
+                df.columns = df.columns.str.strip().str.replace('<', '').str.replace('>', '')
                 saved = await save_historical_to_db(pool, df, symbol, '1d', 'index')
                 logger.info(f"  ✅ {file_path.stem} ({symbol}): {saved} rows saved (Index)")
                 total_saved += saved

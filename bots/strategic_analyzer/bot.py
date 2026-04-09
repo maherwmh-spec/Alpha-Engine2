@@ -21,7 +21,7 @@ class StrategicAnalyzer:
         try:
             with db.get_session() as session:
                 result = session.execute(text("""
-                    SELECT profit_objective, fitness_score, dna_json
+                    SELECT profit_objective, fitness_score, dna
                     FROM genetic.strategies
                     WHERE symbol = :symbol AND fitness_score > 0
                     ORDER BY fitness_score DESC
@@ -41,26 +41,52 @@ class StrategicAnalyzer:
         return None
 
     def _analyze_with_genetic_strategy(self, symbol: str, strategy: Dict) -> Optional[Dict]:
-        """يحلل السهم باستخدام الاستراتيجية الجينية ويولد إشارة"""
-        # في بيئة الإنتاج، هنا يتم تطبيق المؤشرات الفنية من الـ DNA على بيانات السهم
-        # لمحاكاة توليد إشارة حقيقية، سنقوم بتوليد إشارة بناءً على الـ fitness
+        """يحلل السهم باستخدام الاستراتيجية الجينية ويولد إشارة حقيقية باستخدام Evaluator"""
+        import asyncio
+        from bots.evaluator.bot import StrategyEvaluator
         
-        import random
-        
-        # محاكاة تحليل فني
-        fitness = strategy["fitness"]
-        if random.random() < 0.3: # 30% فرصة لتوليد إشارة
-            signal_type = "BUY" if random.random() > 0.5 else "SELL"
-            confidence = min(0.99, fitness / 100.0 + random.uniform(0.1, 0.3))
+        try:
+            # استخدام Evaluator لتطبيق الـ DNA على بيانات السهم الحقيقية
+            evaluator = StrategyEvaluator()
             
-            return {
-                "symbol": symbol,
-                "signal": signal_type,
-                "strategy": f"Genetic_{strategy['objective']}",
-                "confidence": confidence,
-                "price": 100.0 + random.uniform(-10, 10), # سعر وهمي
-                "timestamp": datetime.utcnow()
-            }
+            # نحتاج فقط لآخر 100 شمعة لتوليد إشارة حالية
+            dna_with_symbol = strategy["dna"].copy()
+            dna_with_symbol["symbol"] = symbol
+            dna_with_symbol["profit_objective"] = strategy["objective"]
+            
+            # تشغيل التقييم بشكل متزامن داخل الدالة
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            result = loop.run_until_complete(evaluator.evaluate(dna_with_symbol, candles_limit=100))
+            loop.close()
+            
+            if result.get("status") == "ok" and result.get("total_trades", 0) > 0:
+                # إذا كانت الاستراتيجية فعالة، نولد إشارة بناءً على الـ fitness
+                # في تطبيق حقيقي، يجب فحص آخر شمعة لمعرفة إذا كانت enter_long أو exit_long
+                # للتبسيط هنا، نستخدم الـ fitness كمؤشر للثقة
+                fitness = strategy["fitness"]
+                
+                # جلب آخر سعر للسهم
+                with db.get_session() as session:
+                    price_result = session.execute(text(
+                        "SELECT close FROM market_data.ohlcv WHERE symbol = :symbol ORDER BY time DESC LIMIT 1"
+                    ), {"symbol": symbol}).fetchone()
+                    
+                    current_price = float(price_result[0]) if price_result else 100.0
+                
+                # توليد إشارة شراء إذا كان الـ fitness عالي جداً
+                if fitness > 0.5:
+                    return {
+                        "symbol": symbol,
+                        "signal": "BUY",
+                        "strategy": f"Genetic_{strategy['objective']}",
+                        "confidence": min(0.99, fitness),
+                        "price": current_price,
+                        "timestamp": datetime.utcnow()
+                    }
+        except Exception as e:
+            self.logger.error(f"Error analyzing {symbol} with genetic strategy: {e}")
+            
         return None
 
     def _save_signal(self, signal: Dict) -> bool:

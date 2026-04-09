@@ -593,7 +593,7 @@ elif page == "sectors":
     # ── أداء المؤشر العام (90001) ─────────────────────────────────────────────
     st.subheader("📊 TASI Index (90001)")
     df_index = run_query("""
-        SELECT time, close, change_pct, volume
+        SELECT time, close, volume
         FROM market_data.index_performance
         WHERE symbol = '90001'
         ORDER BY time DESC
@@ -624,7 +624,7 @@ elif page == "sectors":
     st.subheader("🏭 Sector Performance (90010–90030)")
     df_sectors = run_query("""
         SELECT symbol,
-               COALESCE(name, symbol) AS name,
+               COALESCE(name_ar, symbol) AS name,
                close, time
         FROM market_data.sector_performance
         WHERE timeframe = '1d'

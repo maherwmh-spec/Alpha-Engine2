@@ -23,10 +23,14 @@ class FreqAIManager:
         try:
             with db.get_session() as session:
                 result = session.execute(text("""
-                    SELECT symbol, profit_objective, fitness_score, total_profit_pct, win_rate, dna_json
-                    FROM genetic.strategies
-                    WHERE fitness_score > 0
-                    ORDER BY fitness_score DESC
+                    SELECT s.symbol, s.profit_objective, s.fitness_score, 
+                           COALESCE(p.total_profit_pct, 0.0) as total_profit_pct, 
+                           COALESCE(p.win_rate, 0.0) as win_rate, 
+                           s.dna
+                    FROM genetic.strategies s
+                    LEFT JOIN genetic.performance p ON s.strategy_hash = p.strategy_hash
+                    WHERE s.fitness_score > 0
+                    ORDER BY s.fitness_score DESC
                     LIMIT :limit
                 """), {"limit": limit})
                 
@@ -38,7 +42,7 @@ class FreqAIManager:
                         "fitness": float(row[2]),
                         "profit": float(row[3]),
                         "win_rate": float(row[4]),
-                        "dna": row[5] if isinstance(row[5], dict) else json.loads(row[5])
+                        "dna": row[5] if isinstance(row[5], dict) else json.loads(row[5]) if row[5] else {}
                     })
                 return strategies
         except Exception as e:

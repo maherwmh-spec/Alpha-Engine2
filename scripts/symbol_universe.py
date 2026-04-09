@@ -226,7 +226,7 @@ class SymbolUniverse:
         try:
             with db.get_session() as session:
                 result = session.execute(text("""
-                    SELECT profit_objective, fitness_score, dna_json
+                    SELECT profit_objective, fitness_score, dna
                     FROM genetic.strategies
                     WHERE symbol = :symbol AND fitness_score > 0
                     ORDER BY fitness_score DESC
