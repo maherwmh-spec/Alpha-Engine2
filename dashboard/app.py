@@ -290,7 +290,7 @@ if page == "overview":
 # Page: Genetic Engine
 # ===========================================================================
 elif page == "genetic":
-    st.title("🧬 Genetic Engine — Alpha-Engine2")
+    st.title("🧬 المحرك الجيني - اكتشاف استراتيجيات التداول")
     st.caption("المحرك الجيني لاكتشاف وتحسين استراتيجيات التداول تلقائياً")
 
     col1, col2, col3, col4 = st.columns(4)
@@ -334,17 +334,17 @@ elif page == "genetic":
     """)
 
     if df_top.empty:
-        st.info("No genetic strategies found. Run the Scientist bot to start evolution.")
+        st.info("لم يتم اكتشاف أي استراتيجيات جينية بعد. شغّل الدورة الجينية للبدء.")
         st.code("""
-# تشغيل دورة تطور يدوية:
-docker exec alpha_celery_worker python3 -c "
+# تشغيل دورة تطور يدوية (الطريقة الصحيحة)
+docker compose exec celery_worker python3 -c "
 from bots.scientist.tasks import run_genetic_cycle
 result = run_genetic_cycle.apply_async(kwargs={
     'symbols': ['2222', '1120', '2010'],
-    'generations': 5,
-    'population_size': 20,
+    'generations': 10,
+    'population_size': 30,
 })
-print(result.get(timeout=300))
+print(result.get(timeout=600))
 "
         """, language="bash")
     else:
