@@ -840,9 +840,6 @@ class Scientist:
             return None
 
 
-if __name__ == "__main__":
-    bot = Scientist()
-    bot.run()
 
     def walk_forward_optimization(self, df: pd.DataFrame, symbol: str) -> Dict:
         """
@@ -1558,3 +1555,7 @@ if __name__ == "__main__":
         except Exception:
             pass
         return ["2222", "1120", "2010"][:limit]
+
+if __name__ == "__main__":
+    bot = Scientist()
+    bot.run()
