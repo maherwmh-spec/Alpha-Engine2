@@ -621,18 +621,19 @@ elif page == "sectors":
     st.markdown("---")
 
     # ── أداء القطاعات (90010-90030) ──────────────────────────────────────────
-    st.subheader("🏭 Sector Performance (90010–90030)")
+    st.subheader("🏭 Sector Performance (90010\u201390030)")
     df_sectors = run_query("""
         SELECT symbol,
-               COALESCE(name, symbol) AS name,
+               COALESCE(name_ar, name_en, symbol) AS name,
                close, time
         FROM market_data.sector_performance
-        WHERE timeframe = '1d'
         ORDER BY time DESC, symbol
         LIMIT 200
     """)
 
-    if not df_sectors.empty:
+    if df_sectors.empty:
+        st.info("\u062c\u0627\u0631\u064a \u062a\u062d\u0645\u064a\u0644 \u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0642\u0637\u0627\u0639\u0627\u062a...")
+    else:
         df_latest = df_sectors.groupby("symbol").first().reset_index()
         st.dataframe(df_latest, use_container_width=True)
 
@@ -646,8 +647,6 @@ elif page == "sectors":
         )
         fig_sec.update_layout(height=400)
         st.plotly_chart(fig_sec, use_container_width=True)
-    else:
-        st.info("No sector data available yet.")
 
 
 # ===========================================================================
