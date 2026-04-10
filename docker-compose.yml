@@ -89,7 +89,7 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: alpha_celery_worker
-    command: celery -A scripts.celery_app worker --loglevel=info --concurrency=4
+    command: celery -A scripts.celery_app worker --loglevel=info --concurrency=4 --queues=default,high_priority,normal,low_priority,maintenance
     environment:
       - DATABASE_URL=postgresql://alpha_user:alpha_password_2024@postgres:5432/alpha_engine
       - REDIS_URL=redis://:alpha_redis_password_2024@redis:6379/0
