@@ -27,19 +27,25 @@ def run_genetic_cycle(
     Discovers and saves elite strategies for TASI symbols.
     """
     try:
+        logger.info(f"🚀 Starting run_genetic_cycle task with symbols={symbols}, generations={generations}, pop_size={population_size}")
         from bots.scientist.bot import Scientist
         scientist = Scientist()
+        
+        logger.info("🧬 Initializing Genetic Engine...")
         result = scientist.run_genetic_cycle(
             symbols=symbols,
             generations=generations,
             population_size=population_size,
         )
-        logger.info(
-            f"✅ run_genetic_cycle complete: "
-            f"{result.get('total_elite')} elite strategies, "
+        
+        logger.success(
+            f"✅ run_genetic_cycle completed successfully: "
+            f"{result.get('total_elite')} elite strategies found across "
+            f"{result.get('symbols_processed')} symbols in "
             f"{result.get('elapsed_sec')}s"
         )
         return result
     except Exception as exc:
-        logger.error(f"run_genetic_cycle task failed: {exc}")
+        logger.error(f"❌ run_genetic_cycle task failed with error: {exc}")
+        logger.exception(exc)
         raise self.retry(exc=exc, countdown=120)

@@ -595,7 +595,7 @@ elif page == "sectors":
     df_index = run_query("""
         SELECT time, close, volume
         FROM market_data.index_performance
-        WHERE symbol = '90001'
+        WHERE symbol = '90001' AND timeframe = '1d'
         ORDER BY time DESC
         LIMIT 100
     """)
@@ -624,7 +624,7 @@ elif page == "sectors":
     st.subheader("🏭 Sector Performance (90010–90030)")
     df_sectors = run_query("""
         SELECT symbol,
-               COALESCE(name_ar, symbol) AS name,
+               COALESCE(name, symbol) AS name,
                close, time
         FROM market_data.sector_performance
         WHERE timeframe = '1d'

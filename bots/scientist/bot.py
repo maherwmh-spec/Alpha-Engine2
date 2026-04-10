@@ -1395,7 +1395,19 @@ if __name__ == "__main__":
             symbols = self._pick_symbols_for_genetic_cycle()
 
         generator = GeneticGenerator()
-        evaluator = StrategyEvaluator(db_pool=None)  # db_pool يُمرَّر عند الإنتاج
+        
+        # إنشاء db_pool حقيقي للتقييم والحفظ في قاعدة البيانات
+        import asyncpg
+        from config.config_manager import config
+        
+        async def create_pool():
+            return await asyncpg.create_pool(config.get_asyncpg_dsn())
+            
+        loop = asyncio.new_event_loop()
+        db_pool = loop.run_until_complete(create_pool())
+        loop.close()
+        
+        evaluator = StrategyEvaluator(db_pool=db_pool)
 
         total_elite = 0
         objectives_run = 0
@@ -1420,6 +1432,11 @@ if __name__ == "__main__":
                     self.logger.error(
                         f"❌ [GeneticCycle] Failed {symbol} [{objective}]: {e}"
                     )
+
+        # إغلاق db_pool
+        loop = asyncio.new_event_loop()
+        loop.run_until_complete(db_pool.close())
+        loop.close()
 
         elapsed = round(time.time() - start_time, 1)
         summary = {
