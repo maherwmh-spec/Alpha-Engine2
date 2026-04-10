@@ -1,6 +1,7 @@
 # Alpha-Engine2 — Docker Compose
 # NOTE: `version` key removed (obsolete in modern Docker Compose)
 # FIX #0: Added TZ=Asia/Riyadh to all services to enforce Saudi timezone (UTC+3)
+# FIX #1: Added REDIS_PASSWORD env var to ALL services that use Redis (NOAUTH fix)
 
 services:
 
@@ -60,6 +61,10 @@ services:
     environment:
       - DATABASE_URL=postgresql://alpha_user:alpha_password_2024@postgres:5432/alpha_engine
       - REDIS_URL=redis://:alpha_redis_password_2024@redis:6379/0
+      - REDIS_PASSWORD=alpha_redis_password_2024
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
       - PYTHONUNBUFFERED=1
       - TZ=Asia/Riyadh
       - PYTHONIOENCODING=utf-8
@@ -88,6 +93,10 @@ services:
     environment:
       - DATABASE_URL=postgresql://alpha_user:alpha_password_2024@postgres:5432/alpha_engine
       - REDIS_URL=redis://:alpha_redis_password_2024@redis:6379/0
+      - REDIS_PASSWORD=alpha_redis_password_2024
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
       - PYTHONUNBUFFERED=1
       - TZ=Asia/Riyadh
       - PYTHONIOENCODING=utf-8
@@ -116,6 +125,10 @@ services:
     environment:
       - DATABASE_URL=postgresql://alpha_user:alpha_password_2024@postgres:5432/alpha_engine
       - REDIS_URL=redis://:alpha_redis_password_2024@redis:6379/0
+      - REDIS_PASSWORD=alpha_redis_password_2024
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
       - PYTHONUNBUFFERED=1
       - TZ=Asia/Riyadh
       - PYTHONIOENCODING=utf-8
@@ -143,6 +156,10 @@ services:
     command: celery -A scripts.celery_app flower --port=5555
     environment:
       - REDIS_URL=redis://:alpha_redis_password_2024@redis:6379/0
+      - REDIS_PASSWORD=alpha_redis_password_2024
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
       - PYTHONUNBUFFERED=1
       - TZ=Asia/Riyadh
       - PYTHONIOENCODING=utf-8
@@ -165,6 +182,10 @@ services:
     environment:
       - DATABASE_URL=postgresql://alpha_user:alpha_password_2024@postgres:5432/alpha_engine
       - REDIS_URL=redis://:alpha_redis_password_2024@redis:6379/0
+      - REDIS_PASSWORD=alpha_redis_password_2024
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
       - PYTHONUNBUFFERED=1
       - TZ=Asia/Riyadh
       - PYTHONIOENCODING=utf-8
@@ -197,6 +218,10 @@ services:
     environment:
       - DATABASE_URL=postgresql://alpha_user:alpha_password_2024@postgres:5432/alpha_engine
       - REDIS_URL=redis://:alpha_redis_password_2024@redis:6379/0
+      - REDIS_PASSWORD=alpha_redis_password_2024
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
       - PYTHONUNBUFFERED=1
       - TZ=Asia/Riyadh
       - PYTHONIOENCODING=utf-8
@@ -226,6 +251,10 @@ services:
     environment:
       - DATABASE_URL=postgresql://alpha_user:alpha_password_2024@postgres:5432/alpha_engine
       - REDIS_URL=redis://:alpha_redis_password_2024@redis:6379/0
+      - REDIS_PASSWORD=alpha_redis_password_2024
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
       - PYTHONUNBUFFERED=1
       - TZ=Asia/Riyadh
       - PYTHONIOENCODING=utf-8

@@ -1,6 +1,10 @@
 """
 Alpha-Engine2 Configuration Manager
 Loads config.yaml and provides typed access to all settings.
+
+FIX: get_redis_url() now enforces REDIS_PASSWORD from environment variable.
+     If REDIS_PASSWORD is not set, a ValueError is raised immediately.
+     This prevents silent NOAUTH failures.
 """
 import os
 from pathlib import Path
@@ -71,16 +75,59 @@ class ConfigManager:
         password = os.getenv("DB_PASSWORD", db.get("password", "alpha_password_2024"))
         return f"postgresql://{user}:{password}@{host}:{port}/{name}"
 
-    def get_redis_url(self) -> str:
-        """Return Redis URL"""
-        r = self._config.get("redis", {})
-        host     = os.getenv("REDIS_HOST",     r.get("host",     "redis"))
-        port     = os.getenv("REDIS_PORT",     str(r.get("port", 6379)))
-        db       = os.getenv("REDIS_DB",       str(r.get("db",   0)))
-        password = os.getenv("REDIS_PASSWORD", r.get("password", ""))
-        if password:
-            return f"redis://:{password}@{host}:{port}/{db}"
-        return f"redis://{host}:{port}/{db}"
+    def get_redis_url(self, db_index: int = 0) -> str:
+        """
+        Return authenticated Redis URL.
+
+        Priority order for password:
+          1. REDIS_PASSWORD environment variable  ← MANDATORY in Docker
+          2. REDIS_URL environment variable (parsed)
+          3. config.yaml redis.password fallback
+
+        Raises ValueError if no password is found, preventing silent NOAUTH.
+        """
+        import os
+
+        host = os.getenv("REDIS_HOST", self._config.get("redis", {}).get("host", "redis"))
+        port = os.getenv("REDIS_PORT", str(self._config.get("redis", {}).get("port", 6379)))
+        db   = os.getenv("REDIS_DB",   str(self._config.get("redis", {}).get("db", db_index)))
+
+        # ── 1. Try REDIS_PASSWORD env var first (set in docker-compose) ──────
+        password = os.getenv("REDIS_PASSWORD", "").strip()
+
+        # ── 2. Try parsing REDIS_URL env var ─────────────────────────────────
+        if not password:
+            redis_url_env = os.getenv("REDIS_URL", "").strip()
+            if redis_url_env and "@" in redis_url_env:
+                # Format: redis://:PASSWORD@host:port/db
+                try:
+                    auth_part = redis_url_env.split("@")[0]  # redis://:PASSWORD
+                    password = auth_part.split(":")[-1]       # PASSWORD
+                except Exception:
+                    password = ""
+
+        # ── 3. Fallback to config.yaml (last resort, not recommended) ────────
+        if not password:
+            password = self._config.get("redis", {}).get("password", "").strip()
+
+        # ── Validation: refuse to connect without password ────────────────────
+        if not password:
+            raise ValueError(
+                "[FATAL] REDIS_PASSWORD environment variable is not set! "
+                "Redis requires authentication. "
+                "Set REDIS_PASSWORD=alpha_redis_password_2024 in your environment."
+            )
+
+        logger.debug(f"[Redis] Connecting to redis://:{password[:4]}***@{host}:{port}/{db}")
+        return f"redis://:{password}@{host}:{port}/{db}"
+
+    def get_redis_url_for_backend(self) -> str:
+        """Return Redis URL for Celery result backend (db=1)"""
+        url = self.get_redis_url(db_index=1)
+        # Replace /0 with /1 at the end if needed
+        if url.endswith("/0"):
+            url = url[:-2] + "/1"
+        return url
 
     def get_telegram_token(self) -> str:
         return os.getenv(

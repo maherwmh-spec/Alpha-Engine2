@@ -5,6 +5,8 @@ diagnose_db_save.py
 سكريبت تشخيصي يكشف سبب عدم حفظ الشموع في DB.
 يُشغَّل داخل container market_reporter:
   docker compose exec market_reporter python3 scripts/diagnose_db_save.py
+
+FIX: Redis connection now uses REDIS_PASSWORD from environment variable.
 """
 
 import os
@@ -166,12 +168,41 @@ async def test_candle_complete_callback():
         import traceback; traceback.print_exc()
 
 
-# ── 5. فحص Redis ────────────────────────────────────────────────────────────
+# ── 5. فحص Redis (مع المصادقة) ──────────────────────────────────────────────
 def test_redis():
     print(f"\n[5] Checking Redis for recent candles...")
     try:
-        import redis
-        r = redis.Redis(host='redis', port=6379, decode_responses=True)
+        import redis as redis_lib
+
+        # ── قراءة كلمة المرور من البيئة فقط ────────────────────────────────
+        password = os.getenv('REDIS_PASSWORD', '').strip()
+        if not password:
+            redis_url = os.getenv('REDIS_URL', '')
+            if redis_url and '@' in redis_url:
+                try:
+                    auth_part = redis_url.split('@')[0]
+                    password = auth_part.split(':')[-1]
+                except Exception:
+                    password = ''
+
+        if not password:
+            print("    ❌ REDIS_PASSWORD not set — cannot connect to authenticated Redis!")
+            return
+
+        host = os.getenv('REDIS_HOST', 'redis')
+        port = int(os.getenv('REDIS_PORT', '6379'))
+
+        r = redis_lib.Redis(
+            host=host,
+            port=port,
+            password=password,
+            decode_responses=True
+        )
+
+        # اختبار الاتصال
+        r.ping()
+        print(f"    ✅ Redis connected (host={host}, port={port})")
+
         keys = r.keys("ohlcv:1m:*:latest")
         print(f"    Redis keys matching 'ohlcv:1m:*:latest': {len(keys)}")
         if keys:

@@ -4,8 +4,12 @@ Handles distributed task processing and scheduling
 
 Dynamic autodiscovery: automatically finds all bots/*/tasks.py
 so that new bots are picked up without touching this file.
+
+FIX: Redis authentication enforced via REDIS_PASSWORD environment variable.
+     broker uses db/0, result_backend uses db/1 for separation.
 """
 
+import os
 from celery import Celery
 from celery.schedules import crontab
 from loguru import logger
@@ -17,6 +21,39 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from config.config_manager import config
+
+# ── Validate REDIS_PASSWORD before anything else ─────────────────────────────
+REDIS_PASSWORD = os.getenv('REDIS_PASSWORD', '').strip()
+if not REDIS_PASSWORD:
+    # Attempt to extract from REDIS_URL if set
+    _redis_url_env = os.getenv('REDIS_URL', '')
+    if _redis_url_env and '@' in _redis_url_env:
+        try:
+            _auth_part = _redis_url_env.split('@')[0]   # redis://:PASSWORD
+            REDIS_PASSWORD = _auth_part.split(':')[-1]  # PASSWORD
+        except Exception:
+            REDIS_PASSWORD = ''
+
+if not REDIS_PASSWORD:
+    raise ValueError(
+        "[FATAL] REDIS_PASSWORD environment variable is not set! "
+        "Celery cannot connect to Redis without authentication. "
+        "Set REDIS_PASSWORD=alpha_redis_password_2024 in your environment."
+    )
+
+# ── Build Redis URLs from environment (never hardcoded) ──────────────────────
+_redis_host = os.getenv('REDIS_HOST', 'redis')
+_redis_port = os.getenv('REDIS_PORT', '6379')
+
+broker_url      = f"redis://:{REDIS_PASSWORD}@{_redis_host}:{_redis_port}/0"
+result_backend  = f"redis://:{REDIS_PASSWORD}@{_redis_host}:{_redis_port}/1"
+
+logger.info(
+    f"[Celery] Redis broker  → redis://:{REDIS_PASSWORD[:4]}***@{_redis_host}:{_redis_port}/0"
+)
+logger.info(
+    f"[Celery] Redis backend → redis://:{REDIS_PASSWORD[:4]}***@{_redis_host}:{_redis_port}/1"
+)
 
 # ── Dynamic bot discovery ─────────────────────────────────────────────────────
 # Scans bots/<name>/tasks.py at import time — works both locally and in Docker
@@ -36,8 +73,8 @@ logger.info(
 # ── Celery app ────────────────────────────────────────────────────────────────
 app = Celery(
     'alpha_engine',
-    broker=config.get_redis_url(),
-    backend=config.get_redis_url(),
+    broker=broker_url,
+    backend=result_backend,
     include=_discovered_packages + ['scripts.sync_symbols'],  # bots + scripts tasks
 )
 
@@ -56,6 +93,9 @@ app.conf.update(
     task_acks_late=True,
     task_reject_on_worker_lost=True,
     broker_connection_retry_on_startup=True,
+    # Explicit broker/backend URLs (redundant but ensures override)
+    broker_url=broker_url,
+    result_backend=result_backend,
 )
 
 # ── Task routes ───────────────────────────────────────────────────────────────
@@ -196,7 +236,7 @@ app.conf.beat_schedule = {
 # ── Explicit autodiscover (belt-and-suspenders alongside include=) ────────────
 app.autodiscover_tasks(_discovered_packages)
 
-logger.info("Celery application initialized")
+logger.info("Celery application initialized with authenticated Redis connection")
 
 
 @app.task(bind=True)
