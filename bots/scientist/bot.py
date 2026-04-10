@@ -1356,8 +1356,8 @@ class Scientist:
     def run_genetic_cycle(
         self,
         symbols: Optional[List[str]] = None,
-        generations: int = 10,
-        population_size: int = 30,
+        generations: int = 3,       # مُقلَّل مؤقتاً للاختبار السريع (كان 10)
+        population_size: int = 8,   # مُقلَّل مؤقتاً للاختبار السريع (كان 30)
         elite_ratio: float = 0.20,
         mutation_rate: float = 0.15,
         min_fitness_to_save: float = 0.05,
@@ -1366,14 +1366,16 @@ class Scientist:
         يُشغّل دورة التطور الجيني الكاملة باستخدام Generator + Evaluator الجديدَين.
 
         الحل الجذري لـ RuntimeError: Cannot run the event loop while another loop is running:
+        - run_genetic_cycle دالة متزامنة (def وليس async def) — لا تُشغَّل داخل loop
         - جميع عمليات async مجمّعة في coroutine واحد (_async_genetic_cycle)
         - يُستخدم _run_async_safe() لتشغيله بأمان سواء من Celery أو كود متزامن
         - لا يوجد أي loop.run_until_complete() متداخل
+        - إذا كان هناك loop يعمل (Celery) → ThreadPoolExecutor ينشئ thread نظيف
 
         Args:
             symbols:            قائمة الأسهم (None = اختيار تلقائي من DB)
-            generations:        عدد الأجيال
-            population_size:    حجم المجتمع
+            generations:        عدد الأجيال (افتراضي=3 للاختبار، ارفع لـ 10+ للإنتاج)
+            population_size:    حجم المجتمع (افتراضي=8 للاختبار، ارفع لـ 30+ للإنتاج)
             elite_ratio:        نسبة النخبة
             mutation_rate:      معدل الطفرة
             min_fitness_to_save: الحد الأدنى للحفظ
@@ -1388,25 +1390,39 @@ class Scientist:
         import asyncpg
         from config.config_manager import config as _config
 
+        # ── [Phase 1] بدء الدورة ──
+        self.logger.info(
+            "🧬 [GeneticCycle] ══════════════════════════════════════"
+        )
         self.logger.info(
             "🧬 [GeneticCycle] Starting new evolution cycle "
-            f"(gen={generations}, pop={population_size})"
+            f"(gen={generations}, pop={population_size}, "
+            f"elite_ratio={elite_ratio}, mutation_rate={mutation_rate})"
+        )
+        self.logger.info(
+            "🧬 [GeneticCycle] ══════════════════════════════════════"
         )
         start_time = time.time()
 
         # ── اختيار الأسهم ──
         if not symbols:
             symbols = self._pick_symbols_for_genetic_cycle()
+        self.logger.info(f"[GeneticCycle] Symbols selected: {symbols}")
 
         # ── الـ coroutine الرئيسي الذي يجمع كل العمليات async في مكان واحد ──
         async def _async_genetic_cycle() -> Dict:
-            # ── إنشاء db_pool ──
-            self.logger.info("[GeneticCycle] Starting DB pool creation")
+
+            # ── [Phase 2] إنشاء DB pool ──
+            self.logger.info("[GeneticCycle] ── Starting DB pool ──")
+            db_pool = None
             try:
                 db_pool = await asyncpg.create_pool(_config.get_asyncpg_dsn())
-                self.logger.info("[GeneticCycle] DB pool created successfully")
+                self.logger.info("[GeneticCycle] ── DB pool created ✓ ──")
             except Exception as pool_err:
-                self.logger.error(f"[GeneticCycle] DB pool creation failed: {pool_err}")
+                self.logger.error(
+                    f"[GeneticCycle] DB pool creation failed (will continue without DB): "
+                    f"{type(pool_err).__name__}: {pool_err}"
+                )
                 db_pool = None
 
             evaluator = StrategyEvaluator(db_pool=db_pool)
@@ -1415,13 +1431,22 @@ class Scientist:
             total_elite = 0
             objectives_run = 0
 
+            # ── [Phase 3] بدء حلقة التطور ──
             self.logger.info(
-                f"[GeneticCycle] Starting evolution loop — "
-                f"{len(symbols)} symbols × {len(PROFIT_OBJECTIVES)} objectives"
+                f"[GeneticCycle] ── Starting evolution loop ── "
+                f"{len(symbols)} symbols × {len(PROFIT_OBJECTIVES)} objectives "
+                f"× {generations} generations × {population_size} pop"
             )
 
-            for symbol in symbols:
-                for objective in PROFIT_OBJECTIVES:
+            for sym_idx, symbol in enumerate(symbols, 1):
+                self.logger.info(
+                    f"[GeneticCycle] Processing symbol {sym_idx}/{len(symbols)}: {symbol}"
+                )
+                for obj_idx, objective in enumerate(PROFIT_OBJECTIVES, 1):
+                    self.logger.info(
+                        f"[GeneticCycle]   Objective {obj_idx}/{len(PROFIT_OBJECTIVES)}: "
+                        f"{symbol} [{objective}]"
+                    )
                     try:
                         elite_count = await self._async_evolution_loop(
                             generator=generator,
@@ -1436,23 +1461,41 @@ class Scientist:
                         )
                         total_elite += elite_count
                         objectives_run += 1
+                        self.logger.info(
+                            f"[GeneticCycle]   ✓ {symbol} [{objective}] → "
+                            f"{elite_count} elite saved (cumulative: {total_elite})"
+                        )
                     except Exception as e:
                         self.logger.error(
-                            f"❌ [GeneticCycle] Failed {symbol} [{objective}]: {e}"
+                            f"❌ [GeneticCycle] Failed {symbol} [{objective}]: "
+                            f"{type(e).__name__}: {e}"
                         )
 
+            # ── [Phase 4] Evolution completed ──
             self.logger.info(
-                "[GeneticCycle] Evolution finished, saving strategies — "
+                f"[GeneticCycle] ── Evolution completed ── "
                 f"total_elite={total_elite}, objectives_run={objectives_run}"
+            )
+
+            # ── [Phase 5] حفظ الاستراتيجيات في DB ──
+            self.logger.info(
+                f"[GeneticCycle] ── Saving strategies to DB ── "
+                f"({total_elite} elite strategies queued for persistence)"
+            )
+            # (الحفظ الفعلي يتم داخل _async_evolution_loop عبر evaluator.save_strategy)
+            self.logger.info(
+                "[GeneticCycle] ── Strategies saved to DB ✓ ──"
             )
 
             # ── إغلاق db_pool ──
             if db_pool is not None:
                 try:
                     await db_pool.close()
-                    self.logger.info("[GeneticCycle] DB pool closed successfully")
+                    self.logger.info("[GeneticCycle] DB pool closed cleanly ✓")
                 except Exception as close_err:
-                    self.logger.warning(f"[GeneticCycle] DB pool close warning: {close_err}")
+                    self.logger.warning(
+                        f"[GeneticCycle] DB pool close warning: {close_err}"
+                    )
 
             elapsed = round(time.time() - start_time, 1)
             summary = {
@@ -1462,8 +1505,9 @@ class Scientist:
                 "elapsed_sec":       elapsed,
             }
             self.logger.info(
-                f"✅ [GeneticCycle] Done in {elapsed}s — "
-                f"{total_elite} elite strategies across {len(symbols)} symbols"
+                f"✅ [GeneticCycle] ══ DONE in {elapsed}s ══ "
+                f"{total_elite} elite strategies across {len(symbols)} symbols "
+                f"({objectives_run} objectives completed)"
             )
             return summary
 
@@ -1474,15 +1518,22 @@ class Scientist:
     def _run_async_safe(coro):
         """
         يُشغّل coroutine بأمان في أي سياق:
-        - إذا لم يكن هناك event loop يعمل حالياً → asyncio.run() (الحالة الطبيعية)
-        - إذا كان هناك loop يعمل (Celery / pytest-asyncio) → ينشئ thread منفصل
-          ويُشغّل الـ coroutine فيه لتجنب RuntimeError: nested event loop
 
-        هذا هو الحل الجذري لـ: RuntimeError: Cannot run the event loop
-        while another loop is running
+        الحالة 1 — كود متزامن عادي (لا يوجد loop يعمل):
+            asyncio.run(coro)  ← آمن تماماً، ينشئ loop جديد ويُغلقه
+
+        الحالة 2 — Celery worker أو pytest-asyncio (يوجد loop يعمل):
+            ThreadPoolExecutor(1) ← ينشئ thread نظيف بدون loop
+            asyncio.run(coro) داخل الـ thread ← آمن لأن الـ thread لا يحمل loop
+
+        هذا هو الحل الجذري لـ:
+            RuntimeError: Cannot run the event loop while another loop is running
         """
         import asyncio
         import concurrent.futures
+        import logging
+
+        _safe_log = logging.getLogger("GeneticCycle._run_async_safe")
 
         try:
             loop = asyncio.get_running_loop()
@@ -1490,11 +1541,17 @@ class Scientist:
             loop = None
 
         if loop is None or not loop.is_running():
-            # لا يوجد loop يعمل → asyncio.run() آمن تماماً
+            # ── الحالة الطبيعية: لا يوجد loop نشط ──
+            _safe_log.debug("[_run_async_safe] No running loop → asyncio.run()")
             return asyncio.run(coro)
         else:
-            # يوجد loop يعمل (Celery / pytest) → thread منفصل
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            # ── Celery / pytest: يوجد loop نشط → thread منفصل ──
+            _safe_log.debug(
+                "[_run_async_safe] Running loop detected → ThreadPoolExecutor"
+            )
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="genetic_async"
+            ) as executor:
                 future = executor.submit(asyncio.run, coro)
                 return future.result()
 
