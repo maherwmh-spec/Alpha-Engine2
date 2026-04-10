@@ -60,7 +60,7 @@ logger.info(
 # because the working directory is always the project root (/app).
 _bots_dir = project_root / 'bots'
 _discovered_packages = sorted([
-    f'bots.{d.name}'
+    f'bots.{d.name}.tasks'
     for d in _bots_dir.iterdir()
     if d.is_dir() and (d / 'tasks.py').exists()
 ])

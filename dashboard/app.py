@@ -376,15 +376,7 @@ elif page == "genetic":
                     "**الخطوة 2:** تشغيل دورة تطور يدوية عبر Celery Worker:"
                 )
                 st.code(
-                    'docker compose exec celery_worker python3 -c "\n'
-                    'from bots.scientist.tasks import run_genetic_cycle\n'
-                    'result = run_genetic_cycle.apply_async(kwargs={\n'
-                    "    'symbols': ['2222', '1120', '2010', '4200'],\n"
-                    "    'generations': 10,\n"
-                    "    'population_size': 30,\n"
-                    '})\n'
-                    'print(result.get(timeout=600))\n'
-                    '"',
+                    "docker compose exec celery_worker python3 run_genetic_task.py",
                     language="bash",
                 )
 
@@ -491,21 +483,8 @@ elif page == "genetic":
             st.dataframe(df_pending, use_container_width=True)
 
             # ── زر تشغيل الدورة الجينية ──────────────────────────────────────
-            symbols_list = df_pending["symbol"].head(10).tolist()
-            symbols_str  = str(symbols_list).replace(" ", "")
-            run_cmd = (
-                f'docker compose exec celery_worker python3 -c "\n'
-                f'from bots.scientist.tasks import run_genetic_cycle\n'
-                f'result = run_genetic_cycle.apply_async(kwargs={{\n'
-                f"    'symbols': {symbols_str},\n"
-                f"    'generations': 10,\n"
-                f"    'population_size': 30,\n"
-                f'}})\n'
-                f'print(result.get(timeout=600))\n'
-                f'"'
-            )
             with st.expander("▶️ أمر تشغيل الدورة الجينية للرموز المعلقة", expanded=False):
-                st.code(run_cmd, language="bash")
+                st.code("docker compose exec celery_worker python3 run_genetic_task.py", language="bash")
         else:
             st.success("✅ جميع الرموز لديها تحليل جيني حديث (خلال آخر 7 أيام)")
 
