@@ -293,124 +293,221 @@ elif page == "genetic":
     st.title("🧬 المحرك الجيني - اكتشاف استراتيجيات التداول")
     st.caption("المحرك الجيني لاكتشاف وتحسين استراتيجيات التداول تلقائياً")
 
-    col1, col2, col3, col4 = st.columns(4)
+    # ── بطاقات الإحصاءات الرئيسية ─────────────────────────────────────────────
+    # استخدام st.container() لتجنب خطأ NotFoundError (removeChild) عند إعادة التصيير
+    stats_container = st.container()
+    with stats_container:
+        col1, col2, col3, col4 = st.columns(4)
 
-    df_stats = run_query("""
-        SELECT
-            COUNT(DISTINCT symbol) AS symbols,
-            COUNT(*) AS strategies,
-            COALESCE(AVG(fitness_score), 0) AS avg_fitness,
-            COALESCE(MAX(fitness_score), 0) AS best_fitness
-        FROM genetic.strategies
-        WHERE fitness_score > 0
-    """)
+        df_stats = run_query("""
+            SELECT
+                COUNT(DISTINCT symbol)          AS symbols,
+                COUNT(*)                        AS strategies,
+                COALESCE(MAX(fitness_score), 0) AS best_fitness,
+                MAX(created_at)                 AS last_run
+            FROM genetic.strategies
+            WHERE fitness_score > 0
+        """)
 
-    if not df_stats.empty:
-        col1.metric("Symbols Analyzed", int(df_stats["symbols"].iloc[0]))
-        col2.metric("Total Elite Strategies", int(df_stats["strategies"].iloc[0]))
-        col3.metric("Avg Fitness", f"{float(df_stats['avg_fitness'].iloc[0]):.3f}")
-        col4.metric("Best Fitness", f"{float(df_stats['best_fitness'].iloc[0]):.3f}")
+        if not df_stats.empty:
+            n_symbols    = int(df_stats["symbols"].iloc[0])
+            n_strategies = int(df_stats["strategies"].iloc[0])
+            best_fit     = float(df_stats["best_fitness"].iloc[0])
+            last_run_val = df_stats["last_run"].iloc[0]
+            last_run_str = str(last_run_val)[:16] if last_run_val else "لم يُشغَّل بعد"
+        else:
+            n_symbols = n_strategies = 0
+            best_fit  = 0.0
+            last_run_str = "لم يُشغَّل بعد"
+
+        col1.metric("🔬 رموز محللة",         n_symbols)
+        col2.metric("📦 إجمالي الاستراتيجيات", f"{n_strategies:,}")
+        col3.metric("🏅 أفضل Fitness",        f"{best_fit:.4f}")
+        col4.metric("🕐 آخر تشغيل",           last_run_str)
 
     st.markdown("---")
 
-    # ── أفضل 10 استراتيجيات ──────────────────────────────────────────
-    st.subheader("🏆 Top 10 Elite Strategies")
-    df_top = run_query("""
-        SELECT
-            s.symbol,
-            s.profit_objective,
-            s.fitness_score,
-            COALESCE(p.total_profit_pct, 0.0)  AS total_profit_pct,
-            COALESCE(p.win_rate, 0.0)           AS win_rate,
-            COALESCE(p.sharpe_ratio, 0.0)       AS sharpe_ratio,
-            COALESCE(p.max_drawdown_pct, 0.0)   AS max_drawdown_pct,
-            s.created_at
-        FROM genetic.strategies s
-        LEFT JOIN genetic.performance p
-            ON s.strategy_hash = p.strategy_hash
-        WHERE s.fitness_score > 0
-        ORDER BY s.fitness_score DESC
-        LIMIT 10
-    """)
+    # ── أفضل 10 استراتيجيات ──────────────────────────────────────────────────
+    top_container = st.container()
+    with top_container:
+        st.subheader("🏆 Top 10 Elite Strategies")
 
-    if df_top.empty:
-        st.info("لم يتم اكتشاف أي استراتيجيات جينية بعد. شغّل الدورة الجينية للبدء.")
-        st.code("""
-# تشغيل دورة تطور يدوية (الطريقة الصحيحة)
-docker compose exec celery_worker python3 -c "
-from bots.scientist.tasks import run_genetic_cycle
-result = run_genetic_cycle.apply_async(kwargs={
-    'symbols': ['2222', '1120', '2010'],
-    'generations': 10,
-    'population_size': 30,
-})
-print(result.get(timeout=600))
-"
-        """, language="bash")
-    else:
-        st.dataframe(df_top, use_container_width=True)
+        df_top = run_query("""
+            SELECT
+                s.symbol,
+                s.profit_objective,
+                s.risk_box,
+                s.generation,
+                s.fitness_score,
+                COALESCE(p.total_profit_pct, 0.0)  AS total_profit_pct,
+                COALESCE(p.win_rate, 0.0)           AS win_rate,
+                COALESCE(p.sharpe_ratio, 0.0)       AS sharpe_ratio,
+                COALESCE(p.max_drawdown_pct, 0.0)   AS max_drawdown_pct,
+                s.created_at
+            FROM genetic.strategies s
+            LEFT JOIN genetic.performance p
+                ON s.strategy_hash = p.strategy_hash
+            WHERE s.fitness_score > 0
+            ORDER BY s.fitness_score DESC
+            LIMIT 10
+        """)
 
-        fig = px.scatter(
-            df_top,
-            x="win_rate",
-            y="total_profit_pct",
-            size="fitness_score",
-            color="profit_objective",
-            hover_data=["symbol", "sharpe_ratio"],
-            title="Genetic Strategies: Win Rate vs Total Profit",
-        )
-        fig.update_layout(height=400)
-        st.plotly_chart(fig, use_container_width=True)
+        if df_top.empty:
+            # ── حالة: لا توجد استراتيجيات بعد ──────────────────────────────
+            no_data_container = st.container()
+            with no_data_container:
+                st.info(
+                    "🔬 لم يتم اكتشاف أي استراتيجيات جينية بعد. "
+                    "شغّل الدورة الجينية للبدء."
+                )
+
+                st.markdown("#### 🚀 كيفية تشغيل المحرك الجيني")
+
+                st.markdown(
+                    "**الخطوة 1:** تطبيق migration قاعدة البيانات (إن لم يتم بعد):"
+                )
+                st.code(
+                    "psql -U alpha_user -d alpha_engine "
+                    "-f migrations/001_genetic_engine_tables.sql",
+                    language="bash",
+                )
+
+                st.markdown(
+                    "**الخطوة 2:** تشغيل دورة تطور يدوية عبر Celery Worker:"
+                )
+                st.code(
+                    'docker compose exec celery_worker python3 -c "\n'
+                    'from bots.scientist.tasks import run_genetic_cycle\n'
+                    'result = run_genetic_cycle.apply_async(kwargs={\n'
+                    "    'symbols': ['2222', '1120', '2010', '4200'],\n"
+                    "    'generations': 10,\n"
+                    "    'population_size': 30,\n"
+                    '})\n'
+                    'print(result.get(timeout=600))\n'
+                    '"',
+                    language="bash",
+                )
+
+                st.markdown(
+                    "**الخطوة 3:** التحقق من النتائج مباشرةً في قاعدة البيانات:"
+                )
+                st.code(
+                    "SELECT symbol, profit_objective, COUNT(*) AS strategies, "
+                    "MAX(fitness_score) AS best\n"
+                    "FROM genetic.strategies\n"
+                    "GROUP BY symbol, profit_objective\n"
+                    "ORDER BY best DESC;",
+                    language="sql",
+                )
+
+                st.markdown("**الخطوة 4:** إعادة تشغيل الداشبورد بعد اكتمال الدورة:")
+                st.code("docker compose restart dashboard", language="bash")
+
+        else:
+            # ── حالة: توجد استراتيجيات ──────────────────────────────────────
+            st.dataframe(df_top, use_container_width=True)
+
+            fig = px.scatter(
+                df_top,
+                x="win_rate",
+                y="total_profit_pct",
+                size="fitness_score",
+                color="profit_objective",
+                hover_data=["symbol", "sharpe_ratio", "risk_box"],
+                title="Genetic Strategies: Win Rate vs Total Profit",
+                labels={
+                    "win_rate":         "Win Rate",
+                    "total_profit_pct": "الربح الكلي %",
+                    "profit_objective": "الهدف الربحي",
+                },
+            )
+            fig.update_layout(height=400)
+            st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("---")
 
     # ── سجل التطور ──────────────────────────────────────────────────────────
-    st.subheader("📈 Evolution Log")
-    df_elog = run_query("""
-        SELECT symbol, profit_objective, generation, best_fitness, avg_fitness, logged_at
-        FROM genetic.evolution_log
-        ORDER BY logged_at DESC
-        LIMIT 50
-    """)
+    evo_container = st.container()
+    with evo_container:
+        st.subheader("📈 Evolution Log")
 
-    if not df_elog.empty:
-        fig_evo = px.line(
-            df_elog.sort_values(["symbol", "generation"]),
-            x="generation",
-            y="best_fitness",
-            color="symbol",
-            line_dash="profit_objective",
-            title="Fitness Evolution by Generation",
-        )
-        fig_evo.update_layout(height=400)
-        st.plotly_chart(fig_evo, use_container_width=True)
-        st.dataframe(df_elog, use_container_width=True)
-    else:
-        st.info("No evolution log data yet.")
+        df_elog = run_query("""
+            SELECT symbol, profit_objective, generation,
+                   best_fitness, avg_fitness, logged_at
+            FROM genetic.evolution_log
+            ORDER BY logged_at DESC
+            LIMIT 50
+        """)
+
+        if not df_elog.empty:
+            fig_evo = px.line(
+                df_elog.sort_values(["symbol", "generation"]),
+                x="generation",
+                y="best_fitness",
+                color="symbol",
+                line_dash="profit_objective",
+                title="Fitness Evolution by Generation",
+                labels={
+                    "generation":   "الجيل",
+                    "best_fitness": "أفضل Fitness",
+                    "symbol":       "السهم",
+                },
+            )
+            fig_evo.update_layout(height=400)
+            st.plotly_chart(fig_evo, use_container_width=True)
+            st.dataframe(df_elog, use_container_width=True)
+        else:
+            st.info("لا يوجد سجل تطور بعد. ستظهر البيانات هنا بعد تشغيل الدورة الجينية.")
 
     st.markdown("---")
 
     # ── الأسهم التي تحتاج تحليل جيني ────────────────────────────────────────
-    st.subheader("🔬 Symbols Pending Genetic Analysis")
-    df_pending = run_query("""
-        SELECT s.symbol, s.name_ar, s.sector_name_ar,
-               MAX(g.created_at) AS last_genetic_run
-        FROM market_data.symbols s
-        LEFT JOIN genetic.strategies g ON s.symbol = g.symbol
-        WHERE s.is_active = TRUE
-          AND s.symbol ~ '^[1-8][0-9]{3}$'
-        GROUP BY s.symbol, s.name_ar, s.sector_name_ar
-        HAVING MAX(g.created_at) IS NULL
-            OR MAX(g.created_at) < NOW() - INTERVAL '7 days'
-        ORDER BY s.symbol
-        LIMIT 20
-    """)
+    pending_container = st.container()
+    with pending_container:
+        st.subheader("🔬 الرموز المعلقة — تحتاج تحليل جيني")
 
-    if not df_pending.empty:
-        st.warning(f"⚠️ {len(df_pending)} symbols need genetic analysis")
-        st.dataframe(df_pending, use_container_width=True)
-    else:
-        st.success("✅ All symbols have recent genetic analysis")
+        df_pending = run_query("""
+            SELECT
+                s.symbol,
+                COALESCE(s.name_ar, s.symbol)       AS name_ar,
+                COALESCE(s.sector_name_ar, 'غير محدد') AS sector,
+                MAX(g.created_at)                   AS last_genetic_run
+            FROM market_data.symbols s
+            LEFT JOIN genetic.strategies g ON s.symbol = g.symbol
+            WHERE s.is_active = TRUE
+              AND s.symbol ~ '^[1-8][0-9]{3}$'
+            GROUP BY s.symbol, s.name_ar, s.sector_name_ar
+            HAVING MAX(g.created_at) IS NULL
+                OR MAX(g.created_at) < NOW() - INTERVAL '7 days'
+            ORDER BY s.symbol
+            LIMIT 20
+        """)
+
+        if not df_pending.empty:
+            st.warning(
+                f"⚠️ يوجد **{len(df_pending)}** رمزاً يحتاج تحليلاً جينياً "
+                f"(لم يُحلَّل أو مضى على آخر تحليل أكثر من 7 أيام)"
+            )
+            st.dataframe(df_pending, use_container_width=True)
+
+            # ── زر تشغيل الدورة الجينية ──────────────────────────────────────
+            symbols_list = df_pending["symbol"].head(10).tolist()
+            symbols_str  = str(symbols_list).replace(" ", "")
+            run_cmd = (
+                f'docker compose exec celery_worker python3 -c "\n'
+                f'from bots.scientist.tasks import run_genetic_cycle\n'
+                f'result = run_genetic_cycle.apply_async(kwargs={{\n'
+                f"    'symbols': {symbols_str},\n"
+                f"    'generations': 10,\n"
+                f"    'population_size': 30,\n"
+                f'}})\n'
+                f'print(result.get(timeout=600))\n'
+                f'"'
+            )
+            with st.expander("▶️ أمر تشغيل الدورة الجينية للرموز المعلقة", expanded=False):
+                st.code(run_cmd, language="bash")
+        else:
+            st.success("✅ جميع الرموز لديها تحليل جيني حديث (خلال آخر 7 أيام)")
 
 
 # ===========================================================================
