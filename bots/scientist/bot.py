@@ -1365,6 +1365,11 @@ class Scientist:
         """
         يُشغّل دورة التطور الجيني الكاملة باستخدام Generator + Evaluator الجديدَين.
 
+        الحل الجذري لـ RuntimeError: Cannot run the event loop while another loop is running:
+        - جميع عمليات async مجمّعة في coroutine واحد (_async_genetic_cycle)
+        - يُستخدم _run_async_safe() لتشغيله بأمان سواء من Celery أو كود متزامن
+        - لا يوجد أي loop.run_until_complete() متداخل
+
         Args:
             symbols:            قائمة الأسهم (None = اختيار تلقائي من DB)
             generations:        عدد الأجيال
@@ -1380,6 +1385,8 @@ class Scientist:
         import time
         from bots.generator.bot import GeneticGenerator, PROFIT_OBJECTIVES
         from bots.evaluator.bot import StrategyEvaluator
+        import asyncpg
+        from config.config_manager import config as _config
 
         self.logger.info(
             "🧬 [GeneticCycle] Starting new evolution cycle "
@@ -1391,64 +1398,107 @@ class Scientist:
         if not symbols:
             symbols = self._pick_symbols_for_genetic_cycle()
 
-        generator = GeneticGenerator()
-        
-        # إنشاء db_pool حقيقي للتقييم والحفظ في قاعدة البيانات
-        import asyncpg
-        from config.config_manager import config
-        
-        async def create_pool():
-            return await asyncpg.create_pool(config.get_asyncpg_dsn())
-            
-        loop = asyncio.new_event_loop()
-        db_pool = loop.run_until_complete(create_pool())
-        loop.close()
-        
-        evaluator = StrategyEvaluator(db_pool=db_pool)
+        # ── الـ coroutine الرئيسي الذي يجمع كل العمليات async في مكان واحد ──
+        async def _async_genetic_cycle() -> Dict:
+            # ── إنشاء db_pool ──
+            self.logger.info("[GeneticCycle] Starting DB pool creation")
+            try:
+                db_pool = await asyncpg.create_pool(_config.get_asyncpg_dsn())
+                self.logger.info("[GeneticCycle] DB pool created successfully")
+            except Exception as pool_err:
+                self.logger.error(f"[GeneticCycle] DB pool creation failed: {pool_err}")
+                db_pool = None
 
-        total_elite = 0
-        objectives_run = 0
+            evaluator = StrategyEvaluator(db_pool=db_pool)
+            generator = GeneticGenerator()
 
-        for symbol in symbols:
-            for objective in PROFIT_OBJECTIVES:
+            total_elite = 0
+            objectives_run = 0
+
+            self.logger.info(
+                f"[GeneticCycle] Starting evolution loop — "
+                f"{len(symbols)} symbols × {len(PROFIT_OBJECTIVES)} objectives"
+            )
+
+            for symbol in symbols:
+                for objective in PROFIT_OBJECTIVES:
+                    try:
+                        elite_count = await self._async_evolution_loop(
+                            generator=generator,
+                            evaluator=evaluator,
+                            symbol=symbol,
+                            objective=objective,
+                            generations=generations,
+                            population_size=population_size,
+                            elite_ratio=elite_ratio,
+                            mutation_rate=mutation_rate,
+                            min_fitness_to_save=min_fitness_to_save,
+                        )
+                        total_elite += elite_count
+                        objectives_run += 1
+                    except Exception as e:
+                        self.logger.error(
+                            f"❌ [GeneticCycle] Failed {symbol} [{objective}]: {e}"
+                        )
+
+            self.logger.info(
+                "[GeneticCycle] Evolution finished, saving strategies — "
+                f"total_elite={total_elite}, objectives_run={objectives_run}"
+            )
+
+            # ── إغلاق db_pool ──
+            if db_pool is not None:
                 try:
-                    elite_count = self._run_evolution_loop(
-                        generator=generator,
-                        evaluator=evaluator,
-                        symbol=symbol,
-                        objective=objective,
-                        generations=generations,
-                        population_size=population_size,
-                        elite_ratio=elite_ratio,
-                        mutation_rate=mutation_rate,
-                        min_fitness_to_save=min_fitness_to_save,
-                    )
-                    total_elite += elite_count
-                    objectives_run += 1
-                except Exception as e:
-                    self.logger.error(
-                        f"❌ [GeneticCycle] Failed {symbol} [{objective}]: {e}"
-                    )
+                    await db_pool.close()
+                    self.logger.info("[GeneticCycle] DB pool closed successfully")
+                except Exception as close_err:
+                    self.logger.warning(f"[GeneticCycle] DB pool close warning: {close_err}")
 
-        # إغلاق db_pool
-        loop = asyncio.new_event_loop()
-        loop.run_until_complete(db_pool.close())
-        loop.close()
+            elapsed = round(time.time() - start_time, 1)
+            summary = {
+                "symbols_processed": len(symbols),
+                "objectives_run":    objectives_run,
+                "total_elite":       total_elite,
+                "elapsed_sec":       elapsed,
+            }
+            self.logger.info(
+                f"✅ [GeneticCycle] Done in {elapsed}s — "
+                f"{total_elite} elite strategies across {len(symbols)} symbols"
+            )
+            return summary
 
-        elapsed = round(time.time() - start_time, 1)
-        summary = {
-            "symbols_processed": len(symbols),
-            "objectives_run":    objectives_run,
-            "total_elite":       total_elite,
-            "elapsed_sec":       elapsed,
-        }
-        self.logger.info(
-            f"✅ [GeneticCycle] Done in {elapsed}s — "
-            f"{total_elite} elite strategies across {len(symbols)} symbols"
-        )
-        return summary
+        # ── تشغيل الـ coroutine بأمان بغض النظر عن السياق (Celery / sync) ──
+        return self._run_async_safe(_async_genetic_cycle())
 
-    def _run_evolution_loop(
+    @staticmethod
+    def _run_async_safe(coro):
+        """
+        يُشغّل coroutine بأمان في أي سياق:
+        - إذا لم يكن هناك event loop يعمل حالياً → asyncio.run() (الحالة الطبيعية)
+        - إذا كان هناك loop يعمل (Celery / pytest-asyncio) → ينشئ thread منفصل
+          ويُشغّل الـ coroutine فيه لتجنب RuntimeError: nested event loop
+
+        هذا هو الحل الجذري لـ: RuntimeError: Cannot run the event loop
+        while another loop is running
+        """
+        import asyncio
+        import concurrent.futures
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is None or not loop.is_running():
+            # لا يوجد loop يعمل → asyncio.run() آمن تماماً
+            return asyncio.run(coro)
+        else:
+            # يوجد loop يعمل (Celery / pytest) → thread منفصل
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(asyncio.run, coro)
+                return future.result()
+
+    async def _async_evolution_loop(
         self,
         generator,
         evaluator,
@@ -1461,7 +1511,7 @@ class Scientist:
         min_fitness_to_save: float,
     ) -> int:
         """
-        حلقة التطور الداخلية لسهم وهدف واحد.
+        حلقة التطور الداخلية لسهم وهدف واحد — async نقية بلا event loop يدوي.
         تُعيد عدد الاستراتيجيات النخبة المحفوظة.
         """
         import asyncio
@@ -1476,74 +1526,77 @@ class Scientist:
             symbol, objective, size=population_size
         )
 
-        loop = asyncio.new_event_loop()
         evaluated_pop = []
 
-        try:
-            for gen in range(1, generations + 1):
-                # تعيين رقم الجيل
-                for ind in population:
-                    ind["generation"] = gen
+        for gen in range(1, generations + 1):
+            # تعيين رقم الجيل
+            for ind in population:
+                ind["generation"] = gen
 
-                # التقييم
-                tasks = [evaluator.evaluate(ind) for ind in population]
-                results = loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
+            # التقييم — await مباشر بلا loop يدوي
+            tasks = [evaluator.evaluate(ind) for ind in population]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
 
-                # دمج النتائج
-                for ind, result in zip(population, results):
-                    if isinstance(result, Exception):
-                        ind["fitness_score"] = 0.0
-                    else:
-                        ind["fitness_score"] = result.get("fitness_score", 0.0)
-                        for key in [
-                            "total_profit_pct", "win_rate", "total_trades",
-                            "avg_profit_pct", "max_drawdown_pct", "sharpe_ratio",
-                            "profit_factor", "avg_duration_min",
-                        ]:
-                            ind[key] = result.get(key, 0)
+            # دمج النتائج
+            for ind, result in zip(population, results):
+                if isinstance(result, Exception):
+                    ind["fitness_score"] = 0.0
+                else:
+                    ind["fitness_score"] = result.get("fitness_score", 0.0)
+                    for key in [
+                        "total_profit_pct", "win_rate", "total_trades",
+                        "avg_profit_pct", "max_drawdown_pct", "sharpe_ratio",
+                        "profit_factor", "avg_duration_min",
+                    ]:
+                        ind[key] = result.get(key, 0)
 
-                # ترتيب
-                population.sort(
-                    key=lambda x: x.get("fitness_score", 0.0), reverse=True
-                )
-                best = population[0].get("fitness_score", 0.0)
-                avg  = sum(x.get("fitness_score", 0.0) for x in population) / len(population)
+            # ترتيب
+            population.sort(
+                key=lambda x: x.get("fitness_score", 0.0), reverse=True
+            )
+            best = population[0].get("fitness_score", 0.0)
+            avg  = sum(x.get("fitness_score", 0.0) for x in population) / len(population)
 
-                self.logger.info(
-                    f"    Gen {gen:2d}/{generations} | {symbol} [{objective}] | "
-                    f"best={best:.4f} avg={avg:.4f}"
-                )
+            self.logger.info(
+                f"    Gen {gen:2d}/{generations} | {symbol} [{objective}] | "
+                f"best={best:.4f} avg={avg:.4f}"
+            )
 
-                if gen == generations:
-                    evaluated_pop = population
-                    break
+            if gen == generations:
+                evaluated_pop = population
+                break
 
-                # اختيار النخبة وتوليد الجيل التالي
-                elite = generator.select_elite(population, elite_ratio)
-                population = generator.breed_next_generation(
-                    elite, target_size=population_size, mutation_rate=mutation_rate
-                )
-
-        finally:
-            loop.close()
+            # اختيار النخبة وتوليد الجيل التالي
+            elite = generator.select_elite(population, elite_ratio)
+            population = generator.breed_next_generation(
+                elite, target_size=population_size, mutation_rate=mutation_rate
+            )
 
         # ── حفظ أفضل الاستراتيجيات في DB ──
         elite_saved = 0
-        save_loop = asyncio.new_event_loop()
-        try:
-            for ind in evaluated_pop:
-                if ind.get("fitness_score", 0.0) >= min_fitness_to_save:
-                    saved = save_loop.run_until_complete(evaluator.save_strategy(ind))
-                    if saved:
-                        save_loop.run_until_complete(evaluator.save_result(ind))
-                        elite_saved += 1
-        finally:
-            save_loop.close()
+        for ind in evaluated_pop:
+            if ind.get("fitness_score", 0.0) >= min_fitness_to_save:
+                saved = await evaluator.save_strategy(ind)
+                if saved:
+                    await evaluator.save_result(ind)
+                    elite_saved += 1
 
         self.logger.info(
             f"  💾 Saved {elite_saved} elite strategies for {symbol} [{objective}]"
         )
         return elite_saved
+
+    def _run_evolution_loop(self, *args, **kwargs) -> int:
+        """
+        Compatibility shim — يُحوّل الاستدعاء المتزامن القديم إلى
+        _async_evolution_loop الجديدة. محفوظ لضمان التوافق مع أي كود خارجي.
+        """
+        import asyncio
+
+        async def _compat():
+            return await self._async_evolution_loop(*args, **kwargs)
+
+        return self._run_async_safe(_compat())
 
     def _pick_symbols_for_genetic_cycle(self, limit: int = 3) -> List[str]:
         """يختار أسهماً للتحليل الجيني من Redis أو قائمة افتراضية."""
