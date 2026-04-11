@@ -125,6 +125,9 @@ class TechnicalMiner:
     def calculate_adx(self, high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
         """Calculate ADX (Average Directional Index)"""
         try:
+            if len(high) <= period:
+                self.logger.warning(f"Not enough data for ADX calculation (length: {len(high)}, period: {period})")
+                return pd.Series([np.nan] * len(high))
             return ta.trend.ADXIndicator(high, low, close, window=period).adx()
         except Exception as e:
             self.logger.error(f"Error calculating ADX: {e}")
@@ -154,7 +157,7 @@ class TechnicalMiner:
             # Check for minimum required data
             min_candles = 20  # Minimum candles required for basic indicators
             if len(df) < min_candles:
-                self.logger.warning(f"Insufficient data for {symbol}: {len(df)} candles (minimum {min_candles} required)")
+                self.logger.warning(f"Skipping {symbol}: Insufficient data ({len(df)} candles, minimum {min_candles} required)")
                 return {}
             
             if len(df) < 50:

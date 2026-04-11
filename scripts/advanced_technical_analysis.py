@@ -668,6 +668,9 @@ class AdvancedTechnicalAnalysis:
     
     def _calculate_adx(self, df: pd.DataFrame, period: int = 14) -> pd.Series:
         """Calculate Average Directional Index"""
+        if len(df) <= period:
+            return pd.Series([np.nan] * len(df), index=df.index)
+            
         plus_dm = df['high'].diff()
         minus_dm = -df['low'].diff()
         

@@ -592,6 +592,12 @@ class StrategyEvaluator:
             self.logger.debug("No DB pool — skipping save")
             return False
 
+        # التأكد من وجود strategy_hash
+        strategy_hash = result.get("strategy_hash")
+        if not strategy_hash:
+            self.logger.error("Missing 'strategy_hash' in result. Cannot save to DB.")
+            return False
+
         try:
             async with self.db_pool.acquire() as conn:
                 await conn.execute(
@@ -608,20 +614,20 @@ class StrategyEvaluator:
                     )
                     ON CONFLICT DO NOTHING
                     """,
-                    result["strategy_hash"],
-                    result["symbol"],
-                    result["profit_objective"],
-                    result["total_profit_pct"],
-                    result["win_rate"],
-                    result["total_trades"],
-                    result["avg_profit_pct"],
-                    result["max_drawdown_pct"],
-                    result["sharpe_ratio"],
-                    result["profit_factor"],
-                    result["avg_duration_min"],
-                    result["fitness_score"],
-                    result["fitness_formula"],
-                    result["candles_count"],
+                    strategy_hash,
+                    result.get("symbol", "UNKNOWN"),
+                    result.get("profit_objective", "UNKNOWN"),
+                    result.get("total_profit_pct", 0.0),
+                    result.get("win_rate", 0.0),
+                    result.get("total_trades", 0),
+                    result.get("avg_profit_pct", 0.0),
+                    result.get("max_drawdown_pct", 0.0),
+                    result.get("sharpe_ratio", 0.0),
+                    result.get("profit_factor", 0.0),
+                    result.get("avg_duration_min", 0),
+                    result.get("fitness_score", 0.0),
+                    result.get("fitness_formula", ""),
+                    result.get("candles_count", 0),
                 )
 
                 # تحديث fitness_score في جدول الاستراتيجيات
@@ -636,8 +642,8 @@ class StrategyEvaluator:
                         END
                     WHERE strategy_hash = $2
                     """,
-                    result["fitness_score"],
-                    result["strategy_hash"],
+                    result.get("fitness_score", 0.0),
+                    strategy_hash,
                 )
             return True
 
