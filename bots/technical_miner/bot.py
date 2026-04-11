@@ -151,9 +151,17 @@ class TechnicalMiner:
             # Ensure dataframe is clean
             df = sanitize_dataframe(df)
             
-            if len(df) < 50:
-                self.logger.warning(f"Insufficient data for {symbol}: {len(df)} candles")
+            # Check for minimum required data
+            min_candles = 20  # Minimum candles required for basic indicators
+            if len(df) < min_candles:
+                self.logger.warning(f"Insufficient data for {symbol}: {len(df)} candles (minimum {min_candles} required)")
                 return {}
+            
+            if len(df) < 50:
+                self.logger.info(f"Limited data for {symbol}: {len(df)} candles. Proceeding with basic analysis only.")
+                # We can still calculate basic indicators, but advanced analysis might be limited or skipped
+                # We'll let the advanced analysis handle it gracefully or return empty structures
+
             
             # ===== BASIC INDICATORS =====
             basic_indicators = {
@@ -170,7 +178,20 @@ class TechnicalMiner:
             }
             
             # ===== ADVANCED ANALYSIS =====
-            advanced_analysis = analyze_stock_advanced(df)
+            # Only run advanced analysis if we have enough data (e.g., 50+ candles)
+            if len(df) >= 50:
+                advanced_analysis = analyze_stock_advanced(df)
+            else:
+                # Mock empty advanced analysis for limited data
+                advanced_analysis = {
+                    'bos': [], 'choch': [], 'order_blocks': [], 'fvg': [], 'liquidity_pools': [],
+                    'volume_profile': {'poc': None, 'vah': None, 'val': None, 'high_volume_nodes': [], 'low_volume_nodes': []},
+                    'volume_delta': pd.Series([0] * len(df)),
+                    'market_regime': pd.Series(['unknown'] * len(df)),
+                    'engulfing': [], 'pin_bars': [],
+                    'head_shoulders': [], 'double_patterns': [],
+                    'fibonacci': {'retracement': {}, 'extension': {}, 'swing_high': None, 'swing_low': None}
+                }
             
             # ===== TREND & VOLATILITY =====
             trend = detect_trend(df['close'].tolist())

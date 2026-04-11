@@ -121,7 +121,7 @@ class RedisManager:
         """
         try:
             if not isinstance(value, str):
-                value = json.dumps(value)
+                value = json.dumps(value, default=str)
 
             if ttl:
                 self.client.setex(key, ttl, value)
@@ -188,7 +188,7 @@ class RedisManager:
         """Set hash field"""
         try:
             if not isinstance(value, str):
-                value = json.dumps(value)
+                value = json.dumps(value, default=str)
             self.client.hset(name, key, value)
             return True
         except Exception as e:
@@ -242,7 +242,7 @@ class RedisManager:
     def lpush(self, key: str, *values: Any) -> bool:
         """Push values to the left of list"""
         try:
-            serialized = [json.dumps(v) if not isinstance(v, str) else v for v in values]
+            serialized = [json.dumps(v, default=str) if not isinstance(v, str) else v for v in values]
             self.client.lpush(key, *serialized)
             return True
         except Exception as e:
@@ -252,7 +252,7 @@ class RedisManager:
     def rpush(self, key: str, *values: Any) -> bool:
         """Push values to the right of list"""
         try:
-            serialized = [json.dumps(v) if not isinstance(v, str) else v for v in values]
+            serialized = [json.dumps(v, default=str) if not isinstance(v, str) else v for v in values]
             self.client.rpush(key, *serialized)
             return True
         except Exception as e:
@@ -317,7 +317,7 @@ class RedisManager:
     def sadd(self, key: str, *values: Any) -> bool:
         """Add values to set"""
         try:
-            serialized = [json.dumps(v) if not isinstance(v, str) else v for v in values]
+            serialized = [json.dumps(v, default=str) if not isinstance(v, str) else v for v in values]
             self.client.sadd(key, *serialized)
             return True
         except Exception as e:
@@ -343,7 +343,7 @@ class RedisManager:
         """Check if value is in set"""
         try:
             if not isinstance(value, str):
-                value = json.dumps(value)
+                value = json.dumps(value, default=str)
             return bool(self.client.sismember(key, value))
         except Exception as e:
             logger.error(f"Failed to check member in {key}: {e}")
@@ -352,7 +352,7 @@ class RedisManager:
     def srem(self, key: str, *values: Any) -> bool:
         """Remove values from set"""
         try:
-            serialized = [json.dumps(v) if not isinstance(v, str) else v for v in values]
+            serialized = [json.dumps(v, default=str) if not isinstance(v, str) else v for v in values]
             self.client.srem(key, *serialized)
             return True
         except Exception as e:

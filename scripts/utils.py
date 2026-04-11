@@ -300,10 +300,10 @@ def sanitize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df = df.replace([np.inf, -np.inf], np.nan)
     
     # Forward fill NaN values
-    df = df.fillna(method='ffill')
+    df = df.ffill()
     
     # Backward fill remaining NaN
-    df = df.fillna(method='bfill')
+    df = df.bfill()
     
     # Drop any remaining NaN
     df = df.dropna()
