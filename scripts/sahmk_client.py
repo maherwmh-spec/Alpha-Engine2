@@ -391,17 +391,40 @@ class SahmkClient:
                 self.logger.warning(f"⚠️ Could not fetch data for {symbol}, returning empty DataFrame")
                 return pd.DataFrame()
 
+            # === تسجيل تحقيق مفصل ===
+            try:
+                import json
+                self.logger.info(f"📥 RAW RESPONSE for {symbol} ({timeframe}): keys = {list(data.keys()) if isinstance(data, dict) else type(data)}")
+                self.logger.debug(f"📊 RAW DATA sample for {symbol}: {json.dumps(data, ensure_ascii=False, indent=2)[:1500]}...")
+            except Exception as log_e:
+                self.logger.error(f"Error logging raw data for {symbol}: {log_e}")
+
             candles = []
-            if isinstance(data, list):
+            if isinstance(data, dict):
+                # Check common keys for data
+                if 'results' in data:
+                    candles = data['results']
+                else:
+                    candles = data.get('data', data.get('candles', data.get('ohlcv', [])))
+                
+                self.logger.info(f"📋 Extracted from dict, type = {type(candles)}, length = {len(candles) if isinstance(candles, list) else 'N/A'}")
+            elif isinstance(data, list):
                 candles = data
-            elif isinstance(data, dict):
-                candles = data.get('data', data.get('candles', data.get('ohlcv', [])))
+                self.logger.info(f"📋 Direct list, length = {len(candles)}")
+            else:
+                self.logger.warning(f"⚠️ Unexpected response structure for {symbol}: {type(data)}")
+                candles = data
+            # === نهاية التسجيل ===
 
-            if not candles:
-                self.logger.warning(f"⚠️ No candles returned for {symbol}")
+            # حماية التحويل إلى DataFrame
+            if isinstance(candles, list) and len(candles) > 0:
+                df = pd.DataFrame(candles)
+            elif isinstance(candles, (int, float, str, dict)):
+                self.logger.error(f"❌ Unexpected data type for {symbol}: {type(candles)} - Value: {candles}")
+                return pd.DataFrame()  # إرجاع DataFrame فارغ بدل crash
+            else:
+                self.logger.warning(f"⚠️ No valid candles returned for {symbol} or empty list")
                 return pd.DataFrame()
-
-            df = pd.DataFrame(candles)
 
             column_mapping = {
                 't': 'timestamp', 'time': 'timestamp', 'date': 'timestamp',

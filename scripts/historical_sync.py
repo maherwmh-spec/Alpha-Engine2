@@ -163,7 +163,12 @@ async def save_historical_to_db(
     df_copy['volume'] = df_copy['volume'].fillna(0).astype(int) if 'volume' in df_copy.columns else 0
     
     if table_type == 'stock':
-        df_copy['open_interest'] = df_copy.get('open_interest', 0).fillna(0).astype(int)
+        # FIX: df_copy.get() returns 0 (int) when column is missing → .fillna() fails on int
+        # Use safe pattern: check column existence first
+        if 'open_interest' in df_copy.columns:
+            df_copy['open_interest'] = pd.to_numeric(df_copy['open_interest'], errors='coerce').fillna(0).astype(int)
+        else:
+            df_copy['open_interest'] = 0
         df_copy['source'] = f'historical_sync_{timeframe}'
         cols = ['time', 'symbol', 'timeframe', 'name', 'open', 'high', 'low', 'close', 'volume', 'open_interest', 'source']
     elif table_type == 'sector':
