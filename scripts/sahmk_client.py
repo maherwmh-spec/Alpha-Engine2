@@ -23,11 +23,19 @@ FIX (Subscription limit: 60 symbols per connection):
   of MAX_SYMBOLS_PER_CONNECTION (50) and opens a separate WebSocket
   connection for each batch.
 
-FIX (Max 20 symbols per subscribe call):
+FIX (Max 20 symbols per subscribe call + Clean Subscription):
   Sahmk WebSocket rejects any single subscribe call with more than 20 symbols.
   Solution: _on_open() splits each connection's batch (up to 50 symbols) into
   sub-batches of MAX_SYMBOLS_PER_SUBSCRIBE (20) and sends a separate subscribe
-  call for each sub-batch, with a 200ms delay between calls.
+  call for each sub-batch, with a 150ms delay between calls.
+
+  Subscription Cleanup (v2):
+  - self._subscribed flag ensures subscribe calls are sent ONCE per open event
+  - _on_close resets the flag so reconnect gets a clean subscription
+  - _shared_message_handler accumulates 'subscribed' acks per connection and
+    prints ONE success message only when all sub-batches are acknowledged
+  - Unknown message types logged at DEBUG level (not INFO) to reduce noise
+
   Architecture summary:
     - Up to 273 symbols split across multiple connections (50 symbols/connection)
     - Each connection sends multiple subscribe calls (20 symbols/call)
@@ -221,6 +229,13 @@ class CandleAggregator:
 MAX_SYMBOLS_PER_CONNECTION = 50  # أقل من الحد الأقصى (60) بهامش أمان
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# FIX: Max 20 symbols per subscribe call
+# كل اتصال يُقسَّم إلى sub-batches بحد أقصى 20 رمزاً لكل subscribe call
+# ─────────────────────────────────────────────────────────────────────────────
+MAX_SYMBOLS_PER_SUBSCRIBE = 20  # الحد الأقصى لكل subscribe call واحد
+
+
 class _SingleWSConnection:
     """
     Manages a single WebSocket connection for a specific batch of symbols.
@@ -251,6 +266,9 @@ class _SingleWSConnection:
         self._thread: Optional[threading.Thread]   = None
         self._running  = False
         self._retry    = 0
+        # ── FIX: flag لمنع إعادة الاشتراك المزدوج عند reconnect ──────────────
+        self._subscribed = False          # True بعد إرسال جميع subscribe calls
+        self._subscribed_count = 0        # عدد الرموز التي تم إرسال subscribe لها
         self.logger    = logger.bind(component=f"WSConn#{conn_id}")
 
     # ── Public ────────────────────────────────────────────────────────────────
@@ -343,38 +361,53 @@ class _SingleWSConnection:
             )
 
     def _on_open(self, ws):
-        """Subscribe to this batch's symbols upon connection open."""
+        """
+        Subscribe to this batch's symbols upon connection open.
+
+        FIX: يستخدم self._subscribed flag لضمان إرسال subscribe calls
+        مرة واحدة فقط لكل اتصال، حتى عند إعادة الاتصال (reconnect).
+        يُقسَّم الـ batch إلى sub-batches بحد أقصى MAX_SYMBOLS_PER_SUBSCRIBE
+        مع تأخير 150ms بين كل call لتجنب rate limiting.
+        """
         self._retry = 0
-        self.logger.success(
-            f"✅ WebSocket connection #{self.conn_id} opened | "
-            f"Subscribing to {len(self.symbols)} symbols"
-        )
-        
-        # FIX: Max 20 symbols per subscribe call
-        # Split the connection's symbols (up to 60) into sub-batches of max 20
-        MAX_SYMBOLS_PER_SUBSCRIBE = 20
+
+        # ── FIX: منع الاشتراك المزدوج — إعادة تعيين الـ flag عند كل فتح جديد ──
+        # (reconnect = اتصال جديد فعلي، يجب إعادة الاشتراك مرة واحدة)
+        self._subscribed       = False
+        self._subscribed_count = 0
+
+        # ── تقسيم الـ batch إلى sub-batches (max 20 symbols/call) ──────────────
         sub_batches = [
             self.symbols[i:i + MAX_SYMBOLS_PER_SUBSCRIBE]
             for i in range(0, len(self.symbols), MAX_SYMBOLS_PER_SUBSCRIBE)
         ]
-        
+        total_sub_batches = len(sub_batches)
+
         for idx, sub_batch in enumerate(sub_batches, start=1):
+            # ── تسجيل واضح لكل sub-batch ──────────────────────────────────────
+            self.logger.info(
+                f"📡 Connection #{self.conn_id} — "
+                f"subscribing to sub-batch {idx}/{total_sub_batches} "
+                f"({len(sub_batch)} symbols)"
+            )
             subscribe_msg = {
                 'action':  'subscribe',
                 'symbols': sub_batch
             }
             ws.send(json.dumps(subscribe_msg))
-            self.logger.info(
-                f"📡 Connection #{self.conn_id} — subscribing to sub-batch {idx}/{len(sub_batches)} "
-                f"({len(sub_batch)} symbols): "
-                f"{sub_batch[:5]}{'...' if len(sub_batch) > 5 else ''}"
-            )
-            # Small delay between subscribe calls to avoid overwhelming the server
-            time.sleep(0.2)
-            
+            self._subscribed_count += len(sub_batch)
+
+            # ── تأخير 150ms بين كل subscribe call لتجنب rate limiting ─────────
+            if idx < total_sub_batches:
+                time.sleep(0.15)
+
+        # ── تعيين الـ flag: تم إرسال جميع subscribe calls ──────────────────────
+        self._subscribed = True
+
         self.logger.success(
-            f"✅ Connection #{self.conn_id} — finished sending {len(sub_batches)} subscribe calls "
-            f"for {len(self.symbols)} total symbols"
+            f"✅ Connection #{self.conn_id} — "
+            f"finished sending {total_sub_batches} subscribe call(s) "
+            f"for {self._subscribed_count} symbols"
         )
 
     def _on_message(self, ws, message: str):
@@ -385,6 +418,7 @@ class _SingleWSConnection:
             on_tick=self.on_tick_cb,
             on_candle=self.on_candle_cb,
             candle_aggregator=self.candle_aggregator,
+            total_symbols_for_conn=len(self.symbols),  # FIX: لتجميع subscribed acks
         )
 
     def _on_error(self, ws, error):
@@ -395,6 +429,11 @@ class _SingleWSConnection:
             f"⚠️ WebSocket connection #{self.conn_id} closed | "
             f"code={close_status_code} | msg={close_msg}"
         )
+        # FIX: إعادة تعيين الـ subscribed flag و ack counter عند إغلاق الاتصال
+        # حتى يكون الاشتراك نظيفاً عند reconnect
+        self._subscribed       = False
+        self._subscribed_count = 0
+        MultiConnectionWebSocketManager._subscribed_ack_count[self.conn_id] = 0
         # _run_loop handles reconnection
 
 
@@ -501,18 +540,26 @@ class MultiConnectionWebSocketManager:
             for i in range(0, len(symbols), batch_size)
         ]
 
-    @staticmethod
+    # ── تتبع الـ subscribed acks لكل اتصال: conn_id -> عدد الرموز المؤكدة حتى الآن ──
+    _subscribed_ack_count: Dict[int, int] = {}
+
+    @classmethod
     def _shared_message_handler(
+        cls,
         message: str,
         conn_id: int,
         on_tick: Optional[Callable],
         on_candle: Optional[Callable],
         candle_aggregator: "CandleAggregator",
+        total_symbols_for_conn: int = 0,
     ):
         """
         Shared handler for all incoming WebSocket messages across all connections.
         Thread-safe: each connection calls this from its own thread, but
         CandleAggregator already uses an internal lock.
+
+        FIX: رسائل 'subscribed' تُجمع لكل اتصال حتى تكتمل جميع الـ sub-batches،
+        ثم تُطبع رسالة نجاح واحدة فقط عند اكتمال الاشتراك الكامل.
         """
         _log = logger.bind(component=f"WSConn#{conn_id}")
         try:
@@ -572,10 +619,27 @@ class MultiConnectionWebSocketManager:
                 _log.debug(f"💓 WebSocket connection #{conn_id} heartbeat received")
 
             elif msg_type == 'subscribed':
+                # ── FIX: تجميع الـ acks — طباعة رسالة واحدة فقط عند اكتمال الاشتراك الكامل ──
                 syms = data.get('symbols', [])
-                _log.success(
-                    f"✅ WebSocket connection #{conn_id} subscribed to {len(syms)} symbols"
-                )
+                prev = cls._subscribed_ack_count.get(conn_id, 0)
+                cls._subscribed_ack_count[conn_id] = prev + len(syms)
+                accumulated = cls._subscribed_ack_count[conn_id]
+
+                if total_symbols_for_conn > 0 and accumulated >= total_symbols_for_conn:
+                    # اكتمل الاشتراك الكامل — طباعة رسالة نجاح واحدة
+                    _log.success(
+                        f"✅ WebSocket connection #{conn_id} — "
+                        f"subscribed successfully to {accumulated} symbols"
+                    )
+                    # إعادة تعيين العداد للاتصال التالي (reconnect)
+                    cls._subscribed_ack_count[conn_id] = 0
+                else:
+                    # لا يزال يتلقى acks من sub-batches — تسجيل debug فقط
+                    _log.debug(
+                        f"📡 Connection #{conn_id} — "
+                        f"subscribed ack: {len(syms)} symbols "
+                        f"(accumulated: {accumulated}/{total_symbols_for_conn})"
+                    )
 
             elif msg_type == 'error':
                 error_msg = data.get('message', 'Unknown error')
@@ -584,8 +648,8 @@ class MultiConnectionWebSocketManager:
                 )
 
             else:
-                _log.info(
-                    f"🔍 Connection #{conn_id} — unknown message type '{msg_type}': {message}"
+                _log.debug(
+                    f"🔍 Connection #{conn_id} — unknown message type '{msg_type}': {message[:200]}"
                 )
 
         except json.JSONDecodeError as e:
