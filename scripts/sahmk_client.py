@@ -22,6 +22,17 @@ FIX (Subscription limit: 60 symbols per connection):
   Solution: MultiConnectionWebSocketManager splits symbols into batches
   of MAX_SYMBOLS_PER_CONNECTION (50) and opens a separate WebSocket
   connection for each batch.
+
+FIX (Max 20 symbols per subscribe call):
+  Sahmk WebSocket rejects any single subscribe call with more than 20 symbols.
+  Solution: _on_open() splits each connection's batch (up to 50 symbols) into
+  sub-batches of MAX_SYMBOLS_PER_SUBSCRIBE (20) and sends a separate subscribe
+  call for each sub-batch, with a 200ms delay between calls.
+  Architecture summary:
+    - Up to 273 symbols split across multiple connections (50 symbols/connection)
+    - Each connection sends multiple subscribe calls (20 symbols/call)
+    - Example for 50 symbols: 3 subscribe calls (20 + 20 + 10)
+    - Example for 273 symbols: 6 connections × up to 3 subscribe calls each
 """
 
 import os
@@ -338,16 +349,32 @@ class _SingleWSConnection:
             f"✅ WebSocket connection #{self.conn_id} opened | "
             f"Subscribing to {len(self.symbols)} symbols"
         )
-        # Send subscription in a single message (all symbols in this batch ≤ 50)
-        subscribe_msg = {
-            'action':  'subscribe',
-            'symbols': self.symbols
-        }
-        ws.send(json.dumps(subscribe_msg))
-        self.logger.info(
-            f"📡 Connection #{self.conn_id} — subscribed to "
-            f"{len(self.symbols)} symbols: "
-            f"{self.symbols[:5]}{'...' if len(self.symbols) > 5 else ''}"
+        
+        # FIX: Max 20 symbols per subscribe call
+        # Split the connection's symbols (up to 60) into sub-batches of max 20
+        MAX_SYMBOLS_PER_SUBSCRIBE = 20
+        sub_batches = [
+            self.symbols[i:i + MAX_SYMBOLS_PER_SUBSCRIBE]
+            for i in range(0, len(self.symbols), MAX_SYMBOLS_PER_SUBSCRIBE)
+        ]
+        
+        for idx, sub_batch in enumerate(sub_batches, start=1):
+            subscribe_msg = {
+                'action':  'subscribe',
+                'symbols': sub_batch
+            }
+            ws.send(json.dumps(subscribe_msg))
+            self.logger.info(
+                f"📡 Connection #{self.conn_id} — subscribing to sub-batch {idx}/{len(sub_batches)} "
+                f"({len(sub_batch)} symbols): "
+                f"{sub_batch[:5]}{'...' if len(sub_batch) > 5 else ''}"
+            )
+            # Small delay between subscribe calls to avoid overwhelming the server
+            time.sleep(0.2)
+            
+        self.logger.success(
+            f"✅ Connection #{self.conn_id} — finished sending {len(sub_batches)} subscribe calls "
+            f"for {len(self.symbols)} total symbols"
         )
 
     def _on_message(self, ws, message: str):
