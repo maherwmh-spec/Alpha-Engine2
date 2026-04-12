@@ -5,20 +5,21 @@ Bot 2: Market Reporter - مُراسل السوق
 ======================================
 مسؤول حصراً عن جمع البيانات اللحظية عبر WebSocket أثناء أوقات التداول.
 
-المنطق الجديد (بعد الإصلاح الهيكلي):
-  ┌─────────────────────────────────────────────────────────────────┐
-  │  عند بدء التشغيل:                                               │
-  │                                                                  │
-  │  إذا كان السوق مفتوحاً (10:00 - 15:00 أيام الأحد-الخميس):      │
-  │    → يتخطى المزامنة التاريخية تماماً                            │
-  │    → يتصل بـ WebSocket فوراً ويشترك في جميع الأسهم النشطة       │
-  │                                                                  │
-  │  إذا كان السوق مغلقاً:                                          │
-  │    → يعمل في وضع الانتظار (heartbeat)                           │
-  │    → ينتظر حتى يفتح السوق ثم يبدأ الاتصال                      │
-  │                                                                  │
-  │  المزامنة التاريخية: مفصولة تماماً في scripts/historical_sync.py │
-  └─────────────────────────────────────────────────────────────────┘
+جدول سوق TASI الصحيح (توقيت الرياض — Asia/Riyadh):
+  ┌──────────────────────────────────────────────────────────────────┐
+  │  أيام التداول : الأحد – الخميس (Python weekday: 6, 0, 1, 2, 3) │
+  │  المزاد الافتتاحي  : 09:30                                       │
+  │  بدء التداول الفعلي: 10:00                                       │
+  │  الإغلاق           : 15:00                                       │
+  │  المزاد الختامي    : 15:00 – 15:30                               │
+  │  ⇒ is_market_open() = True من 09:30 إلى 15:30                    │
+  │  ⇒ is_market_open() = False يوم الجمعة/السبت أو خارج الفترة     │
+  └──────────────────────────────────────────────────────────────────┘
+
+المنطق الرئيسي:
+  • السوق مفتوح  → WebSocket + حفظ شموع لحظية
+  • السوق مغلق   → تشغيل historical_sync.py في الخلفية تلقائياً
+                   ثم انتظار حتى يفتح السوق
 
 ملاحظات تقنية:
   - redis_manager.get/set هي SYNC — لا تستخدم await معها
@@ -28,6 +29,8 @@ Bot 2: Market Reporter - مُراسل السوق
 
 import asyncio
 import os
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
@@ -40,7 +43,7 @@ from loguru import logger
 from config.config_manager import config
 from scripts.redis_manager import redis_manager
 from scripts.sahmk_client import SahmkClient, get_sahmk_client, is_tasi_or_sector
-from scripts.utils import get_saudi_time, is_trading_hours
+from scripts.utils import get_saudi_time
 from scripts.sector_calculator import (
     compute_sector_candles_from_db,
     save_sector_candles_to_db,
@@ -58,11 +61,150 @@ FETCH_CONCURRENCY = 20
 
 SECTOR_NAMES: Dict[str, str] = SECTOR_DISPLAY_NAMES
 
+# أيام التداول في Python weekday (Monday=0 … Sunday=6)
+# الأحد=6، الاثنين=0، الثلاثاء=1، الأربعاء=2، الخميس=3
+TRADING_DAYS_PYTHON = {6, 0, 1, 2, 3}  # Sun–Thu
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Market Hours Helper
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def is_market_open() -> bool:
+    """
+    تحقق من حالة سوق TASI وفق الجدول الرسمي.
+
+    جدول TASI (Asia/Riyadh):
+      - أيام التداول : الأحد – الخميس (Python weekday: 6, 0, 1, 2, 3)
+      - المزاد الافتتاحي  : 09:30
+      - بدء التداول الفعلي: 10:00
+      - الإغلاق           : 15:00
+      - المزاد الختامي    : 15:00 – 15:30
+      ⇒ يُعتبر السوق مفتوحاً من 09:30 إلى 15:30 شاملاً.
+
+    يعيد True  : من 09:30 إلى 15:30 في أيام الأحد–الخميس.
+    يعيد False : يوم الجمعة أو السبت، أو خارج النافذة الزمنية أعلاه.
+    """
+    now = get_saudi_time()
+    weekday = now.weekday()  # Monday=0 … Sunday=6
+
+    # ── فحص يوم الأسبوع ──────────────────────────────────────────────────────
+    if weekday not in TRADING_DAYS_PYTHON:
+        logger.info(
+            f"[is_market_open] ❌ CLOSED — عطلة نهاية الأسبوع "
+            f"({now.strftime('%A')} | weekday={weekday})"
+        )
+        return False
+
+    # ── نافذة التداول ─────────────────────────────────────────────────────────
+    market_open  = now.replace(hour=9,  minute=30, second=0, microsecond=0)
+    market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
+
+    if now < market_open:
+        diff = int((market_open - now).total_seconds() // 60)
+        logger.info(
+            f"[is_market_open] ❌ CLOSED — قبل فتح السوق "
+            f"({now.strftime('%H:%M')} AST | يفتح بعد {diff} دقيقة)"
+        )
+        return False
+
+    if now > market_close:
+        logger.info(
+            f"[is_market_open] ❌ CLOSED — بعد إغلاق السوق "
+            f"({now.strftime('%H:%M')} AST | أُغلق في 15:30)"
+        )
+        return False
+
+    # ── تحديد مرحلة السوق ────────────────────────────────────────────────────
+    continuous_start = now.replace(hour=10, minute=0, second=0, microsecond=0)
+    closing_auction  = now.replace(hour=15, minute=0, second=0, microsecond=0)
+
+    if now < continuous_start:
+        phase = "المزاد الافتتاحي (09:30–10:00)"
+    elif now < closing_auction:
+        phase = "التداول المستمر (10:00–15:00)"
+    else:
+        phase = "المزاد الختامي (15:00–15:30)"
+
+    logger.info(
+        f"[is_market_open] ✅ OPEN — {now.strftime('%A %H:%M')} AST | {phase}"
+    )
+    return True
+
+
+def seconds_until_market_open() -> int:
+    """
+    احسب عدد الثواني حتى فتح السوق القادم (09:30 AST).
+    يأخذ في الاعتبار عطلة نهاية الأسبوع (الجمعة والسبت).
+    """
+    now = get_saudi_time()
+
+    # حاول اليوم نفسه إذا كان يوم تداول وقبل 09:30
+    today_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
+    if now.weekday() in TRADING_DAYS_PYTHON and now < today_open:
+        secs = max(1, int((today_open - now).total_seconds()))
+        logger.debug(f"[seconds_until_open] اليوم نفسه — بعد {secs // 60} دقيقة")
+        return secs
+
+    # ابحث عن أقرب يوم تداول قادم
+    candidate = now + timedelta(days=1)
+    for _ in range(7):
+        candidate_open = candidate.replace(hour=9, minute=30, second=0, microsecond=0)
+        if candidate.weekday() in TRADING_DAYS_PYTHON:
+            secs = max(1, int((candidate_open - now).total_seconds()))
+            logger.debug(
+                f"[seconds_until_open] يوم {candidate.strftime('%A')} "
+                f"— بعد {secs // 3600:.1f} ساعة"
+            )
+            return secs
+        candidate += timedelta(days=1)
+
+    return 3600  # fallback: ساعة واحدة
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Historical Sync Runner
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _launch_historical_sync() -> Optional[subprocess.Popen]:
+    """
+    تشغيل scripts/historical_sync.py في الخلفية كعملية مستقلة.
+    يعيد كائن Popen أو None عند الفشل.
+    """
+    # تحديد مسار السكربت بالنسبة لموقع هذا الملف
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sync_script  = os.path.join(project_root, "scripts", "historical_sync.py")
+
+    if not os.path.isfile(sync_script):
+        logger.error(f"[historical_sync] ❌ السكربت غير موجود: {sync_script}")
+        return None
+
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, sync_script],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            cwd=project_root,
+            env=os.environ.copy(),
+        )
+        logger.success(
+            f"[historical_sync] ✅ تم تشغيل historical_sync.py في الخلفية "
+            f"(PID={proc.pid})"
+        )
+        return proc
+    except Exception as e:
+        logger.error(f"[historical_sync] ❌ فشل تشغيل historical_sync.py: {e}")
+        return None
+
 
 class MarketReporter:
     """
     Real-time market data collector — WebSocket only during trading hours.
-    المزامنة التاريخية مفصولة في scripts/historical_sync.py
+
+    السلوك:
+      • السوق مفتوح  → WebSocket + حفظ شموع لحظية في DB + Redis
+      • السوق مغلق   → تشغيل historical_sync.py تلقائياً في الخلفية
+                       ثم انتظار حتى يفتح السوق
     """
 
     def __init__(self):
@@ -78,7 +220,13 @@ class MarketReporter:
         self._candle_queue: asyncio.Queue = None
         self._main_loop = None
 
-        self.logger.info("✅ MarketReporter initialized (realtime-only mode)")
+        # تتبع حالة historical_sync لتجنب إعادة التشغيل المتكررة
+        self._hist_sync_proc: Optional[subprocess.Popen] = None
+        self._hist_sync_started_at: Optional[datetime] = None
+        # الحد الأدنى بين كل تشغيلين لـ historical_sync (بالثواني) = 30 دقيقة
+        self._hist_sync_cooldown = 1800
+
+        self.logger.info("✅ MarketReporter initialized")
 
     def _load_config(self):
         """Load configurations from YAML."""
@@ -100,11 +248,11 @@ class MarketReporter:
         نقطة الدخول الرئيسية.
 
         المنطق:
-          - إذا كان السوق مفتوحاً → ابدأ WebSocket فوراً
-          - إذا كان السوق مغلقاً → انتظر حتى يفتح
-          - لا مزامنة تاريخية هنا (استخدم scripts/historical_sync.py)
+          • إذا كان السوق مفتوحاً  → ابدأ WebSocket فوراً
+          • إذا كان السوق مغلقاً   → شغّل historical_sync تلقائياً
+                                      ثم انتظر حتى يفتح
         """
-        self.logger.info("🚀 MarketReporter starting (realtime-only)...")
+        self.logger.info("🚀 MarketReporter starting...")
         self._main_loop = asyncio.get_running_loop()
         self._candle_queue = asyncio.Queue(maxsize=10000)
 
@@ -129,29 +277,35 @@ class MarketReporter:
         # ── الحلقة الرئيسية ───────────────────────────────────────────────
         while True:
             try:
-                now_saudi = get_saudi_time()
-                trading_open = is_trading_hours()
+                now_saudi  = get_saudi_time()
+                market_open = is_market_open()
 
-                if trading_open:
-                    # ── وضع التداول: WebSocket فوري بدون مزامنة تاريخية ──
+                if market_open:
+                    # ── وضع التداول: WebSocket فوري ──────────────────────
                     self.logger.info(
-                        f"📈 Market is OPEN ({now_saudi.strftime('%H:%M')} AST) "
-                        f"— starting WebSocket stream immediately"
+                        f"📈 Market is OPEN ({now_saudi.strftime('%A %H:%M')} AST) "
+                        f"— starting real-time WebSocket stream"
                     )
+                    # إذا كان historical_sync لا يزال يعمل، أوقفه بلطف
+                    self._stop_historical_sync_if_running()
                     await self._run_realtime_session()
+
                 else:
-                    # ── السوق مغلق: انتظر حتى يفتح ──────────────────────
-                    wait_secs = self._seconds_until_market_open()
+                    # ── السوق مغلق: historical sync + انتظار ─────────────
+                    wait_secs = seconds_until_market_open()
                     self.logger.info(
-                        f"💤 Market is CLOSED ({now_saudi.strftime('%H:%M')} AST) "
-                        f"— waiting {wait_secs // 60:.0f} min until open. "
-                        f"Run 'python scripts/historical_sync.py' for historical data."
+                        f"💤 Market is CLOSED ({now_saudi.strftime('%A %H:%M')} AST) "
+                        f"— يفتح بعد {wait_secs // 60:.0f} دقيقة"
                     )
+
                     # إيقاف الـ stream إذا كان جارياً
                     if self._realtime_active:
                         self.sahmk.stop_realtime_stream()
                         self._realtime_active = False
                         self.logger.info("📴 WebSocket stream stopped (market closed)")
+
+                    # ── تشغيل historical_sync تلقائياً ───────────────────
+                    self._maybe_run_historical_sync()
 
                     # انتظر بفترات قصيرة مع إعادة الفحص كل دقيقة
                     await asyncio.sleep(min(wait_secs, 60))
@@ -160,10 +314,64 @@ class MarketReporter:
                 self.logger.error(f"❌ Main loop error: {e}", exc_info=True)
                 await asyncio.sleep(30)
 
+    def _maybe_run_historical_sync(self):
+        """
+        تشغيل historical_sync.py في الخلفية إذا لم يكن يعمل بالفعل
+        وانقضت فترة الـ cooldown منذ آخر تشغيل.
+        """
+        now = get_saudi_time()
+
+        # هل العملية السابقة لا تزال تعمل؟
+        if self._hist_sync_proc is not None:
+            poll = self._hist_sync_proc.poll()
+            if poll is None:
+                self.logger.debug(
+                    f"[historical_sync] ⏳ لا يزال يعمل (PID={self._hist_sync_proc.pid})"
+                )
+                return
+            else:
+                self.logger.info(
+                    f"[historical_sync] ✅ انتهى (PID={self._hist_sync_proc.pid} | exit={poll})"
+                )
+                self._hist_sync_proc = None
+
+        # هل انقضت فترة الـ cooldown؟
+        if self._hist_sync_started_at is not None:
+            elapsed = (now - self._hist_sync_started_at).total_seconds()
+            if elapsed < self._hist_sync_cooldown:
+                remaining = int(self._hist_sync_cooldown - elapsed)
+                self.logger.debug(
+                    f"[historical_sync] ⏸ cooldown — {remaining // 60} دقيقة متبقية"
+                )
+                return
+
+        # ── تشغيل جديد ───────────────────────────────────────────────────
+        self.logger.info(
+            "📚 Market is CLOSED → Running historical sync in background..."
+        )
+        proc = _launch_historical_sync()
+        if proc:
+            self._hist_sync_proc       = proc
+            self._hist_sync_started_at = now
+
+    def _stop_historical_sync_if_running(self):
+        """إيقاف عملية historical_sync إذا كانت تعمل (السوق فتح)."""
+        if self._hist_sync_proc is not None and self._hist_sync_proc.poll() is None:
+            self.logger.info(
+                f"[historical_sync] 🛑 السوق فتح — إيقاف historical_sync "
+                f"(PID={self._hist_sync_proc.pid})"
+            )
+            self._hist_sync_proc.terminate()
+            try:
+                self._hist_sync_proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self._hist_sync_proc.kill()
+            self._hist_sync_proc = None
+
     async def _run_realtime_session(self):
         """
         تشغيل جلسة البيانات اللحظية حتى إغلاق السوق.
-        يبدأ WebSocket فوراً ويظل يعمل حتى 15:00.
+        يبدأ WebSocket فوراً ويظل يعمل حتى 15:30.
         """
         # ── جلب قائمة الأسهم النشطة ──────────────────────────────────────
         all_symbols = self.sahmk.get_symbols_list() or self._default_symbols()
@@ -175,10 +383,16 @@ class MarketReporter:
         # ── انتظر حتى يُغلق السوق مع فحص دوري كل دقيقة ─────────────────
         self.logger.success(
             f"✅ Streaming {len(all_symbols)} symbols. "
-            f"Will stop at 15:00 AST."
+            f"Will stop at 15:30 AST."
         )
-        while is_trading_hours():
+        while is_market_open():
             await asyncio.sleep(60)
+            now_str = get_saudi_time().strftime('%H:%M')
+            self.logger.info(
+                f"📡 Real-time active | {now_str} AST | "
+                f"candles={self._candles_saved} | "
+                f"queue={self._candle_queue.qsize()}"
+            )
             # تحديث قائمة الأسهم كل ساعة إذا تغيرت
             if not hasattr(self, '_last_symbol_refresh'):
                 self._last_symbol_refresh = get_saudi_time()
@@ -189,35 +403,10 @@ class MarketReporter:
                     await self.start_realtime_stream(new_symbols)
                 self._last_symbol_refresh = get_saudi_time()
 
-        self.logger.info("🔔 Market closed (15:00 AST) — stopping WebSocket stream")
+        self.logger.info("🔔 Market closed (15:30 AST) — stopping WebSocket stream")
         if self._realtime_active:
             self.sahmk.stop_realtime_stream()
             self._realtime_active = False
-
-    def _seconds_until_market_open(self) -> int:
-        """احسب الثواني حتى فتح السوق القادم."""
-        now = get_saudi_time()
-        # يوم التداول القادم: الأحد=0 ... الخميس=4
-        # الجمعة=4 (weekday)، السبت=5 في Python
-        # السوق السعودي: الأحد-الخميس (weekday 6,0,1,2,3 في Python)
-        # Python: Monday=0, ..., Sunday=6
-        # تاسي: Sunday=6, Monday=0, Tuesday=1, Wednesday=2, Thursday=3
-        trading_days_python = {6, 0, 1, 2, 3}  # Sun-Thu
-
-        # حاول اليوم نفسه أولاً (إذا كان قبل 10:00)
-        today_open = now.replace(hour=10, minute=0, second=0, microsecond=0)
-        if now.weekday() in trading_days_python and now < today_open:
-            return max(1, int((today_open - now).total_seconds()))
-
-        # ابحث عن اليوم التالي
-        candidate = now + timedelta(days=1)
-        for _ in range(7):
-            candidate = candidate.replace(hour=10, minute=0, second=0, microsecond=0)
-            if candidate.weekday() in trading_days_python:
-                return max(1, int((candidate - now).total_seconds()))
-            candidate += timedelta(days=1)
-
-        return 3600  # fallback: ساعة واحدة
 
     async def _heartbeat_only_mode(self):
         """وضع الطوارئ عند فشل تهيئة الخدمات الأساسية."""
@@ -225,7 +414,13 @@ class MarketReporter:
         while True:
             await asyncio.sleep(60)
             tick += 1
-            self.logger.info(f"💓 MarketReporter heartbeat (degraded) | tick={tick}")
+            now_str = get_saudi_time().strftime('%A %H:%M')
+            self.logger.info(
+                f"💓 MarketReporter heartbeat (degraded) | tick={tick} | {now_str} AST"
+            )
+            # حتى في وضع الطوارئ: شغّل historical_sync عند الإغلاق
+            if not is_market_open():
+                self._maybe_run_historical_sync()
 
     # ═══════════════════════════════════════════════════════════════════════
     # Database Operations
@@ -259,7 +454,6 @@ class MarketReporter:
         ts = pd.to_datetime(candle['timestamp'])
         if ts.tzinfo is None:
             # Naive timestamp: assume it is already local Riyadh time
-            # (WebSocket delivers wall-clock Riyadh time without tz info)
             ts = _RIYADH_TZ.localize(ts)
         else:
             # Aware timestamp (e.g. UTC from some sources): convert to Riyadh

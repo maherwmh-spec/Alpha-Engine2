@@ -22,30 +22,57 @@ def get_saudi_time() -> datetime:
 
 
 def is_trading_hours() -> bool:
-    """Check if current time is within trading hours"""
+    """
+    Check if current time is within TASI (Saudi Exchange) trading hours.
+
+    TASI Market Schedule (Asia/Riyadh):
+      - Trading days : Sunday to Thursday (Python weekday: 6, 0, 1, 2, 3)
+      - Opening Auction : 09:30
+      - Continuous Trading: 10:00 – 15:00
+      - Closing Auction  : 15:00 – 15:30
+      - Market considered OPEN from 09:30 to 15:30 inclusive.
+
+    Returns True if market is open, False otherwise.
+    """
     saudi_time = get_saudi_time()
-    
-    # Trading days: Sunday to Thursday
-    if saudi_time.weekday() in [5, 6]:  # Friday, Saturday
+
+    # Python weekday(): Monday=0, Tuesday=1, ..., Friday=4, Saturday=5, Sunday=6
+    # TASI trading days: Sunday(6), Monday(0), Tuesday(1), Wednesday(2), Thursday(3)
+    TRADING_DAYS = {6, 0, 1, 2, 3}  # Sun–Thu
+
+    if saudi_time.weekday() not in TRADING_DAYS:  # Friday(4) or Saturday(5)
+        logger.debug(
+            f"[is_trading_hours] CLOSED — weekend day "
+            f"(weekday={saudi_time.weekday()}, {saudi_time.strftime('%A')})"
+        )
         return False
-    
-    # Trading hours: 10:00 - 15:00
-    trading_start = saudi_time.replace(hour=10, minute=0, second=0, microsecond=0)
-    trading_end = saudi_time.replace(hour=15, minute=0, second=0, microsecond=0)
-    
-    return trading_start <= saudi_time <= trading_end
+
+    # Opening auction starts at 09:30; closing auction ends at 15:30
+    market_open  = saudi_time.replace(hour=9,  minute=30, second=0, microsecond=0)
+    market_close = saudi_time.replace(hour=15, minute=30, second=0, microsecond=0)
+
+    is_open = market_open <= saudi_time <= market_close
+    logger.debug(
+        f"[is_trading_hours] {'OPEN' if is_open else 'CLOSED'} — "
+        f"{saudi_time.strftime('%A %H:%M')} AST "
+        f"(window 09:30–15:30)"
+    )
+    return is_open
 
 
 def get_next_trading_day() -> datetime:
-    """Get the next trading day"""
+    """
+    Get the next TASI trading day (Sunday–Thursday) opening time (09:30 AST).
+    Skips Friday (weekday=4) and Saturday (weekday=5).
+    """
     saudi_time = get_saudi_time()
     next_day = saudi_time + timedelta(days=1)
-    
-    # Skip Friday and Saturday
-    while next_day.weekday() in [4, 5]:  # Friday, Saturday
+
+    # Skip Friday(4) and Saturday(5)
+    while next_day.weekday() in [4, 5]:
         next_day += timedelta(days=1)
-    
-    return next_day.replace(hour=10, minute=0, second=0, microsecond=0)
+
+    return next_day.replace(hour=9, minute=30, second=0, microsecond=0)
 
 
 def parse_timeframe(timeframe: str) -> timedelta:
