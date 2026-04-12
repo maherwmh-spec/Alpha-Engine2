@@ -255,7 +255,9 @@ class _SingleWSConnection:
     ):
         self.conn_id          = conn_id
         self.ws_url           = ws_url
-        self.symbols          = symbols
+        # ── FIX: deep copy + deduplicate — ضمان قائمة رموز خاصة ونظيفة لكل اتصال ──
+        # list(dict.fromkeys(...)) يحافظ على الترتيب ويزيل التكرار
+        self.symbols          = list(dict.fromkeys(symbols))
         self.on_message_cb    = on_message_cb
         self.on_tick_cb       = on_tick_cb
         self.on_candle_cb     = on_candle_cb
@@ -269,6 +271,9 @@ class _SingleWSConnection:
         # ── FIX: flag لمنع إعادة الاشتراك المزدوج عند reconnect ──────────────
         self._subscribed = False          # True بعد إرسال جميع subscribe calls
         self._subscribed_count = 0        # عدد الرموز التي تم إرسال subscribe لها
+        # ── FIX: instance-level ack counter (بدلاً من class-level المشترك) ──────
+        self._ack_count = 0               # عدد الرموز المؤكدة من السيرفر لهذا الاتصال
+        self._ack_lock  = threading.Lock()  # thread-safety للـ ack counter
         self.logger    = logger.bind(component=f"WSConn#{conn_id}")
 
     # ── Public ────────────────────────────────────────────────────────────────
@@ -283,10 +288,11 @@ class _SingleWSConnection:
             name=f"SahmkWS-{self.conn_id}"
         )
         self._thread.start()
+        # ── FIX: تسجيل الرموز الفريدة المخصصة لهذا الاتصال ──────────────────────
+        unique_count = len(self.symbols)
         self.logger.info(
-            f"🔌 Opening WebSocket connection #{self.conn_id} "
-            f"for {len(self.symbols)} symbols: "
-            f"{self.symbols[:5]}{'...' if len(self.symbols) > 5 else ''}"
+            f"🔌 Connection #{self.conn_id} — assigned {unique_count} unique symbols: "
+            f"{self.symbols[:5]}{'...' if unique_count > 5 else ''}"
         )
 
     def stop(self):
@@ -364,31 +370,50 @@ class _SingleWSConnection:
         """
         Subscribe to this batch's symbols upon connection open.
 
-        FIX: يستخدم self._subscribed flag لضمان إرسال subscribe calls
-        مرة واحدة فقط لكل اتصال، حتى عند إعادة الاتصال (reconnect).
-        يُقسَّم الـ batch إلى sub-batches بحد أقصى MAX_SYMBOLS_PER_SUBSCRIBE
-        مع تأخير 150ms بين كل call لتجنب rate limiting.
+        FIX v3:
+        - يستخدم self.symbols المنظّف (deep copy + deduplicated من __init__)
+        - يعيد تعيين instance-level ack counter عند كل فتح جديد
+        - يتحقق من عدم وجود تكرار داخل كل sub-batch قبل الإرسال
+        - يسجّل عدد الرموز الفريدة في كل sub-batch
         """
         self._retry = 0
 
-        # ── FIX: منع الاشتراك المزدوج — إعادة تعيين الـ flag عند كل فتح جديد ──
-        # (reconnect = اتصال جديد فعلي، يجب إعادة الاشتراك مرة واحدة)
+        # ── FIX v3: إعادة تعيين جميع العدادات عند كل فتح جديد (reconnect أو أول اتصال) ──
         self._subscribed       = False
         self._subscribed_count = 0
+        with self._ack_lock:
+            self._ack_count = 0
+
+        # ── FIX v3: استخدام الرموز المنظّفة من self.symbols (تم deduplicate في __init__) ──
+        unique_symbols = self.symbols          # بالفعل فريدة بالفعل
+        total_unique   = len(unique_symbols)
+
+        self.logger.info(
+            f"🔌 Connection #{self.conn_id} — opening with {total_unique} unique symbols: "
+            f"{unique_symbols[:5]}{'...' if total_unique > 5 else ''}"
+        )
 
         # ── تقسيم الـ batch إلى sub-batches (max 20 symbols/call) ──────────────
         sub_batches = [
-            self.symbols[i:i + MAX_SYMBOLS_PER_SUBSCRIBE]
-            for i in range(0, len(self.symbols), MAX_SYMBOLS_PER_SUBSCRIBE)
+            unique_symbols[i:i + MAX_SYMBOLS_PER_SUBSCRIBE]
+            for i in range(0, total_unique, MAX_SYMBOLS_PER_SUBSCRIBE)
         ]
         total_sub_batches = len(sub_batches)
 
         for idx, sub_batch in enumerate(sub_batches, start=1):
-            # ── تسجيل واضح لكل sub-batch ──────────────────────────────────────
+            # ── FIX v3: تحقق من عدم وجود تكرار داخل الـ sub-batch ────────────────
+            unique_in_batch = len(set(sub_batch))
+            if unique_in_batch != len(sub_batch):
+                self.logger.warning(
+                    f"⚠️ Connection #{self.conn_id} — sub-batch {idx} has duplicates! "
+                    f"{len(sub_batch)} total vs {unique_in_batch} unique — deduplicating"
+                )
+                sub_batch = list(dict.fromkeys(sub_batch))
+
             self.logger.info(
                 f"📡 Connection #{self.conn_id} — "
-                f"subscribing to sub-batch {idx}/{total_sub_batches} "
-                f"({len(sub_batch)} symbols)"
+                f"sub-batch {idx}/{total_sub_batches}: "
+                f"{unique_in_batch} unique symbols"
             )
             subscribe_msg = {
                 'action':  'subscribe',
@@ -401,24 +426,26 @@ class _SingleWSConnection:
             if idx < total_sub_batches:
                 time.sleep(0.15)
 
-        # ── تعيين الـ flag: تم إرسال جميع subscribe calls ──────────────────────
+        # ── تعيين الـ flag: تم إرسال جميع subscribe calls ──────────────────
         self._subscribed = True
 
         self.logger.success(
             f"✅ Connection #{self.conn_id} — "
-            f"finished sending {total_sub_batches} subscribe call(s) "
-            f"for {self._subscribed_count} symbols"
+            f"sent {total_sub_batches} subscribe call(s) "
+            f"for {self._subscribed_count} unique symbols"
         )
 
     def _on_message(self, ws, message: str):
         """Delegate to shared message handler."""
+        # ── FIX v3: تمرير self (الـ instance) بدلاً من class-level dict ────────────────
         self.on_message_cb(
             message,
             conn_id=self.conn_id,
             on_tick=self.on_tick_cb,
             on_candle=self.on_candle_cb,
             candle_aggregator=self.candle_aggregator,
-            total_symbols_for_conn=len(self.symbols),  # FIX: لتجميع subscribed acks
+            total_symbols_for_conn=len(self.symbols),  # عدد الرموز الفريدة لهذا الاتصال
+            conn_instance=self,                        # ── FIX v3: instance للـ ack counter
         )
 
     def _on_error(self, ws, error):
@@ -429,11 +456,11 @@ class _SingleWSConnection:
             f"⚠️ WebSocket connection #{self.conn_id} closed | "
             f"code={close_status_code} | msg={close_msg}"
         )
-        # FIX: إعادة تعيين الـ subscribed flag و ack counter عند إغلاق الاتصال
-        # حتى يكون الاشتراك نظيفاً عند reconnect
+        # ── FIX v3: إعادة تعيين جميع العدادات عند إغلاق الاتصال ─────────────────────
         self._subscribed       = False
         self._subscribed_count = 0
-        MultiConnectionWebSocketManager._subscribed_ack_count[self.conn_id] = 0
+        with self._ack_lock:
+            self._ack_count = 0
         # _run_loop handles reconnection
 
 
@@ -471,6 +498,10 @@ class MultiConnectionWebSocketManager:
         """
         Split symbols into batches and open one WebSocket connection per batch.
 
+        FIX v3:
+        - تطبيق deduplicate على القائمة الكاملة قبل التقسيم
+        - تسجيل عدد الرموز الفريدة ومجموع الاتصالات
+
         Args:
             symbols: Full list of stock symbols to subscribe to
         """
@@ -479,19 +510,35 @@ class MultiConnectionWebSocketManager:
             return
 
         self._running = True
-        batches = self._split_into_batches(symbols, MAX_SYMBOLS_PER_CONNECTION)
 
+        # ── FIX v3: deduplicate الرموز قبل التقسيم — منع أي تكرار عبر الاتصالات ──────────
+        unique_symbols = list(dict.fromkeys(symbols))   # يحافظ على الترتيب
+        if len(unique_symbols) != len(symbols):
+            self.logger.warning(
+                f"⚠️ Duplicate symbols detected in input list! "
+                f"{len(symbols)} total → {len(unique_symbols)} unique — deduplicating"
+            )
+        else:
+            self.logger.info(
+                f"✅ No duplicates in symbol list: {len(unique_symbols)} unique symbols"
+            )
+
+        batches = self._split_into_batches(unique_symbols, MAX_SYMBOLS_PER_CONNECTION)
+
+        # تحقق من أن مجموع الرموز عبر الاتصالات = العدد الفريد الإجمالي
+        total_across_batches = sum(len(b) for b in batches)
         self.logger.info(
             f"🚀 Starting {len(batches)} WebSocket connections for "
-            f"{len(symbols)} symbols "
-            f"(max {MAX_SYMBOLS_PER_CONNECTION} symbols/connection)"
+            f"{len(unique_symbols)} unique symbols "
+            f"(max {MAX_SYMBOLS_PER_CONNECTION} symbols/connection) | "
+            f"Total across all batches: {total_across_batches}"
         )
 
         for idx, batch in enumerate(batches, start=1):
             conn = _SingleWSConnection(
                 conn_id=idx,
                 ws_url=self.ws_url,
-                symbols=batch,
+                symbols=batch,          # كل batch فريد بالفعل (لا تكرار بين الاتصالات)
                 on_message_cb=self._shared_message_handler,
                 on_tick_cb=self.on_tick_cb,
                 on_candle_cb=self.on_candle_cb,
@@ -505,7 +552,8 @@ class MultiConnectionWebSocketManager:
 
         self.logger.success(
             f"✅ {len(self._connections)} WebSocket connections launched | "
-            f"Total symbols: {len(symbols)}"
+            f"Total unique symbols: {len(unique_symbols)} | "
+            f"Total across batches: {total_across_batches}"
         )
 
     def stop(self):
@@ -540,7 +588,8 @@ class MultiConnectionWebSocketManager:
             for i in range(0, len(symbols), batch_size)
         ]
 
-    # ── تتبع الـ subscribed acks لكل اتصال: conn_id -> عدد الرموز المؤكدة حتى الآن ──
+    # ── FIX v3: تم نقل الـ ack counter إلى instance-level في _SingleWSConnection ────────────────
+    # _subscribed_ack_count محتفظ به هنا للتوافق الخلفي فقط (لا يُستخدم بعد الآن)
     _subscribed_ack_count: Dict[int, int] = {}
 
     @classmethod
@@ -552,13 +601,15 @@ class MultiConnectionWebSocketManager:
         on_candle: Optional[Callable],
         candle_aggregator: "CandleAggregator",
         total_symbols_for_conn: int = 0,
+        conn_instance: Optional[Any] = None,   # ── FIX v3: instance للـ ack counter
     ):
         """
         Shared handler for all incoming WebSocket messages across all connections.
         Thread-safe: each connection calls this from its own thread, but
         CandleAggregator already uses an internal lock.
 
-        FIX: رسائل 'subscribed' تُجمع لكل اتصال حتى تكتمل جميع الـ sub-batches،
+        FIX v3: رسائل 'subscribed' تُجمع عبر instance-level ack counter لكل اتصال
+        (بدلاً من class-level dict المشترك الذي يتراكم عبر الجلسات)،
         ثم تُطبع رسالة نجاح واحدة فقط عند اكتمال الاشتراك الكامل.
         """
         _log = logger.bind(component=f"WSConn#{conn_id}")
@@ -619,25 +670,38 @@ class MultiConnectionWebSocketManager:
                 _log.debug(f"💓 WebSocket connection #{conn_id} heartbeat received")
 
             elif msg_type == 'subscribed':
-                # ── FIX: تجميع الـ acks — طباعة رسالة واحدة فقط عند اكتمال الاشتراك الكامل ──
+                # ── FIX v3: استخدام instance-level ack counter بدلاً من class-level ─────────────
                 syms = data.get('symbols', [])
-                prev = cls._subscribed_ack_count.get(conn_id, 0)
-                cls._subscribed_ack_count[conn_id] = prev + len(syms)
-                accumulated = cls._subscribed_ack_count[conn_id]
+                unique_acked = len(set(syms))   # عدد الرموز الفريدة في هذا الـ ack
+
+                if conn_instance is not None:
+                    # ── استخدام instance-level ack counter (thread-safe) ─────────────────
+                    with conn_instance._ack_lock:
+                        conn_instance._ack_count += unique_acked
+                        accumulated = conn_instance._ack_count
+                else:
+                    # ── fallback: class-level (legacy) ──────────────────────────────────
+                    prev = cls._subscribed_ack_count.get(conn_id, 0)
+                    cls._subscribed_ack_count[conn_id] = prev + unique_acked
+                    accumulated = cls._subscribed_ack_count[conn_id]
 
                 if total_symbols_for_conn > 0 and accumulated >= total_symbols_for_conn:
                     # اكتمل الاشتراك الكامل — طباعة رسالة نجاح واحدة
                     _log.success(
-                        f"✅ WebSocket connection #{conn_id} — "
-                        f"subscribed successfully to {accumulated} symbols"
+                        f"✅ Connection #{conn_id} subscribed successfully to "
+                        f"{accumulated} unique symbols"
                     )
                     # إعادة تعيين العداد للاتصال التالي (reconnect)
-                    cls._subscribed_ack_count[conn_id] = 0
+                    if conn_instance is not None:
+                        with conn_instance._ack_lock:
+                            conn_instance._ack_count = 0
+                    else:
+                        cls._subscribed_ack_count[conn_id] = 0
                 else:
-                    # لا يزال يتلقى acks من sub-batches — تسجيل debug فقط
-                    _log.debug(
+                    # لا يزال يتلقى acks من sub-batches — تسجيل INFO للمتابعة
+                    _log.info(
                         f"📡 Connection #{conn_id} — "
-                        f"subscribed ack: {len(syms)} symbols "
+                        f"subscribed ack: {unique_acked} unique symbols "
                         f"(accumulated: {accumulated}/{total_symbols_for_conn})"
                     )
 
@@ -1213,7 +1277,7 @@ class SahmkClient:
             self.logger.warning("⚠️ WebSocket already running")
             return
 
-        # ── فصل الأسهم العادية عن القطاعات ──────────────────────────────────
+        # ── فصل الأسهم العادية عن القطاعات ────────────────────────────────
         stock_symbols  = [s for s in symbols if not is_sector_symbol(s)]
         sector_symbols = [s for s in symbols if is_sector_symbol(s)]
 
@@ -1223,6 +1287,15 @@ class SahmkClient:
                 f"(will be computed from DB via sector_calculator): {sector_symbols[:5]}..."
             )
 
+        # ── FIX v3: deduplicate على مستوى start_realtime_stream أيضاً ──────────────────
+        unique_stock_symbols = list(dict.fromkeys(stock_symbols))
+        if len(unique_stock_symbols) != len(stock_symbols):
+            self.logger.warning(
+                f"⚠️ Duplicate stock symbols detected before stream start! "
+                f"{len(stock_symbols)} → {len(unique_stock_symbols)} unique — deduplicating"
+            )
+            stock_symbols = unique_stock_symbols
+
         self._subscribed_symbols = stock_symbols
         self._ws_running         = True
 
@@ -1231,7 +1304,7 @@ class SahmkClient:
         num_connections = math.ceil(len(stock_symbols) / MAX_SYMBOLS_PER_CONNECTION)
 
         self.logger.info(
-            f"🚀 Starting real-time stream for {len(stock_symbols)} stock symbols "
+            f"🚀 Starting real-time stream for {len(stock_symbols)} unique stock symbols "
             f"using {num_connections} WebSocket connection(s) "
             f"(max {MAX_SYMBOLS_PER_CONNECTION} symbols/connection) | "
             f"Excluded {len(sector_symbols)} sector symbols | "
@@ -1251,7 +1324,7 @@ class SahmkClient:
         self.logger.success(
             f"✅ Real-time stream started | "
             f"{num_connections} WebSocket connections | "
-            f"{len(stock_symbols)} symbols total"
+            f"{len(stock_symbols)} unique symbols total"
         )
 
     def stop_realtime_stream(self):
