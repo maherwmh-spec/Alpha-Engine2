@@ -6,6 +6,7 @@ with full error handling, auto-retry, and logging.
 Features:
 - REST API: Fetch OHLCV historical data
 - WebSocket: Real-time tick data (every second)
+- Multi-connection WebSocket: max 50 symbols per connection (limit is 60)
 - Auto-retry after 30 seconds on connection failure
 - Rate limiting (60 requests/minute)
 - Comprehensive logging
@@ -15,6 +16,12 @@ FIX (403 Forbidden):
   websocket-client adds an 'Origin' header automatically.
   Sahmk's Cloudflare proxy rejects it with 403.
   Solution: pass suppress_origin=True to run_forever() to strip the header.
+
+FIX (Subscription limit: 60 symbols per connection):
+  Sahmk WebSocket allows max 60 symbols per single connection.
+  Solution: MultiConnectionWebSocketManager splits symbols into batches
+  of MAX_SYMBOLS_PER_CONNECTION (50) and opens a separate WebSocket
+  connection for each batch.
 """
 
 import os
@@ -194,12 +201,387 @@ class CandleAggregator:
                 return None
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# FIX: MultiConnectionWebSocketManager
+# يحل مشكلة "Subscription limit: 60 symbols per connection"
+# عبر فتح اتصال WebSocket منفصل لكل دفعة من MAX_SYMBOLS_PER_CONNECTION رمز
+# ─────────────────────────────────────────────────────────────────────────────
+
+MAX_SYMBOLS_PER_CONNECTION = 50  # أقل من الحد الأقصى (60) بهامش أمان
+
+
+class _SingleWSConnection:
+    """
+    Manages a single WebSocket connection for a specific batch of symbols.
+    Used internally by MultiConnectionWebSocketManager.
+    """
+
+    def __init__(
+        self,
+        conn_id: int,
+        ws_url: str,
+        symbols: List[str],
+        on_message_cb: Callable,
+        on_tick_cb: Optional[Callable],
+        on_candle_cb: Optional[Callable],
+        candle_aggregator: "CandleAggregator",
+        reconnect_delay: int = 30,
+    ):
+        self.conn_id          = conn_id
+        self.ws_url           = ws_url
+        self.symbols          = symbols
+        self.on_message_cb    = on_message_cb
+        self.on_tick_cb       = on_tick_cb
+        self.on_candle_cb     = on_candle_cb
+        self.candle_aggregator = candle_aggregator
+        self.reconnect_delay  = reconnect_delay
+
+        self._ws: Optional[websocket.WebSocketApp] = None
+        self._thread: Optional[threading.Thread]   = None
+        self._running  = False
+        self._retry    = 0
+        self.logger    = logger.bind(component=f"WSConn#{conn_id}")
+
+    # ── Public ────────────────────────────────────────────────────────────────
+
+    def start(self):
+        """Start this connection in a background thread."""
+        self._running = True
+        self._retry   = 0
+        self._thread  = threading.Thread(
+            target=self._run_loop,
+            daemon=True,
+            name=f"SahmkWS-{self.conn_id}"
+        )
+        self._thread.start()
+        self.logger.info(
+            f"🔌 Opening WebSocket connection #{self.conn_id} "
+            f"for {len(self.symbols)} symbols: "
+            f"{self.symbols[:5]}{'...' if len(self.symbols) > 5 else ''}"
+        )
+
+    def stop(self):
+        """Stop this connection."""
+        self._running = False
+        if self._ws:
+            try:
+                self._ws.close()
+            except Exception:
+                pass
+            self._ws = None
+        self.logger.info(f"🛑 WebSocket connection #{self.conn_id} stopped")
+
+    def is_alive(self) -> bool:
+        return self._running and self._thread is not None and self._thread.is_alive()
+
+    # ── Internal ──────────────────────────────────────────────────────────────
+
+    def _run_loop(self):
+        """Main loop: connect, run, reconnect on failure."""
+        while self._running:
+            try:
+                self._connect()
+            except Exception as e:
+                self.logger.error(
+                    f"❌ Connection #{self.conn_id} fatal error: {e}"
+                )
+            if self._running:
+                self._retry += 1
+                wait = min(self.reconnect_delay * self._retry, 300)
+                self.logger.info(
+                    f"🔄 Connection #{self.conn_id} reconnecting in {wait}s "
+                    f"(attempt {self._retry})"
+                )
+                time.sleep(wait)
+
+    def _connect(self):
+        """Create and run a single WebSocket connection."""
+        self._ws = websocket.WebSocketApp(
+            self.ws_url,
+            on_open=self._on_open,
+            on_message=self._on_message,
+            on_error=self._on_error,
+            on_close=self._on_close,
+        )
+        self.logger.info(
+            f"🔌 WebSocket connection #{self.conn_id} connecting to: {self.ws_url}"
+        )
+        try:
+            self._ws.run_forever(
+                ping_interval=30,
+                ping_timeout=10,
+                suppress_origin=True,   # FIX: removes Origin header (403 fix)
+            )
+        except TypeError:
+            # Older websocket-client: no suppress_origin
+            self.logger.warning(
+                f"⚠️ Connection #{self.conn_id}: suppress_origin not supported, "
+                "using empty header fallback"
+            )
+            self._ws = websocket.WebSocketApp(
+                self.ws_url,
+                header={},
+                on_open=self._on_open,
+                on_message=self._on_message,
+                on_error=self._on_error,
+                on_close=self._on_close,
+            )
+            self._ws.run_forever(
+                ping_interval=30,
+                ping_timeout=10,
+            )
+
+    def _on_open(self, ws):
+        """Subscribe to this batch's symbols upon connection open."""
+        self._retry = 0
+        self.logger.success(
+            f"✅ WebSocket connection #{self.conn_id} opened | "
+            f"Subscribing to {len(self.symbols)} symbols"
+        )
+        # Send subscription in a single message (all symbols in this batch ≤ 50)
+        subscribe_msg = {
+            'action':  'subscribe',
+            'symbols': self.symbols
+        }
+        ws.send(json.dumps(subscribe_msg))
+        self.logger.info(
+            f"📡 Connection #{self.conn_id} — subscribed to "
+            f"{len(self.symbols)} symbols: "
+            f"{self.symbols[:5]}{'...' if len(self.symbols) > 5 else ''}"
+        )
+
+    def _on_message(self, ws, message: str):
+        """Delegate to shared message handler."""
+        self.on_message_cb(
+            message,
+            conn_id=self.conn_id,
+            on_tick=self.on_tick_cb,
+            on_candle=self.on_candle_cb,
+            candle_aggregator=self.candle_aggregator,
+        )
+
+    def _on_error(self, ws, error):
+        self.logger.error(f"❌ WebSocket connection #{self.conn_id} error: {error}")
+
+    def _on_close(self, ws, close_status_code, close_msg):
+        self.logger.warning(
+            f"⚠️ WebSocket connection #{self.conn_id} closed | "
+            f"code={close_status_code} | msg={close_msg}"
+        )
+        # _run_loop handles reconnection
+
+
+class MultiConnectionWebSocketManager:
+    """
+    Manages multiple WebSocket connections to bypass the 60-symbol-per-connection limit.
+
+    - Splits symbols into batches of MAX_SYMBOLS_PER_CONNECTION (50)
+    - Opens one WebSocket connection per batch
+    - Each connection auto-reconnects independently on failure
+    - Provides unified start/stop/status interface
+    """
+
+    def __init__(
+        self,
+        ws_url: str,
+        on_tick_cb: Optional[Callable],
+        on_candle_cb: Optional[Callable],
+        candle_aggregator: "CandleAggregator",
+        reconnect_delay: int = 30,
+    ):
+        self.ws_url            = ws_url
+        self.on_tick_cb        = on_tick_cb
+        self.on_candle_cb      = on_candle_cb
+        self.candle_aggregator = candle_aggregator
+        self.reconnect_delay   = reconnect_delay
+
+        self._connections: List[_SingleWSConnection] = []
+        self._running = False
+        self.logger   = logger.bind(component="MultiWSManager")
+
+    # ── Public ────────────────────────────────────────────────────────────────
+
+    def start(self, symbols: List[str]):
+        """
+        Split symbols into batches and open one WebSocket connection per batch.
+
+        Args:
+            symbols: Full list of stock symbols to subscribe to
+        """
+        if self._running:
+            self.logger.warning("⚠️ MultiConnectionWebSocketManager already running")
+            return
+
+        self._running = True
+        batches = self._split_into_batches(symbols, MAX_SYMBOLS_PER_CONNECTION)
+
+        self.logger.info(
+            f"🚀 Starting {len(batches)} WebSocket connections for "
+            f"{len(symbols)} symbols "
+            f"(max {MAX_SYMBOLS_PER_CONNECTION} symbols/connection)"
+        )
+
+        for idx, batch in enumerate(batches, start=1):
+            conn = _SingleWSConnection(
+                conn_id=idx,
+                ws_url=self.ws_url,
+                symbols=batch,
+                on_message_cb=self._shared_message_handler,
+                on_tick_cb=self.on_tick_cb,
+                on_candle_cb=self.on_candle_cb,
+                candle_aggregator=self.candle_aggregator,
+                reconnect_delay=self.reconnect_delay,
+            )
+            self._connections.append(conn)
+            conn.start()
+            # Small stagger to avoid thundering-herd on the server
+            time.sleep(0.5)
+
+        self.logger.success(
+            f"✅ {len(self._connections)} WebSocket connections launched | "
+            f"Total symbols: {len(symbols)}"
+        )
+
+    def stop(self):
+        """Stop all WebSocket connections."""
+        self._running = False
+        self.logger.info(
+            f"🛑 Stopping {len(self._connections)} WebSocket connections..."
+        )
+        for conn in self._connections:
+            conn.stop()
+        self._connections.clear()
+        self.logger.info("🛑 All WebSocket connections stopped")
+
+    def is_running(self) -> bool:
+        return self._running and any(c.is_alive() for c in self._connections)
+
+    def get_status(self) -> Dict:
+        alive = sum(1 for c in self._connections if c.is_alive())
+        return {
+            'total_connections': len(self._connections),
+            'alive_connections': alive,
+            'running':           self._running,
+        }
+
+    # ── Internal ──────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _split_into_batches(symbols: List[str], batch_size: int) -> List[List[str]]:
+        """Split a list into chunks of at most batch_size."""
+        return [
+            symbols[i: i + batch_size]
+            for i in range(0, len(symbols), batch_size)
+        ]
+
+    @staticmethod
+    def _shared_message_handler(
+        message: str,
+        conn_id: int,
+        on_tick: Optional[Callable],
+        on_candle: Optional[Callable],
+        candle_aggregator: "CandleAggregator",
+    ):
+        """
+        Shared handler for all incoming WebSocket messages across all connections.
+        Thread-safe: each connection calls this from its own thread, but
+        CandleAggregator already uses an internal lock.
+        """
+        _log = logger.bind(component=f"WSConn#{conn_id}")
+        try:
+            data = json.loads(message)
+            msg_type = data.get('type', data.get('event', ''))
+
+            if msg_type == 'quote':
+                symbol     = str(data.get('symbol', ''))
+                quote_data = data.get('data', {})
+                price      = float(quote_data.get('price', 0))
+                volume     = float(quote_data.get('volume', 0))
+
+                ts_raw = data.get('timestamp')
+                if ts_raw:
+                    try:
+                        timestamp = datetime.fromisoformat(
+                            str(ts_raw).replace('Z', '+00:00')
+                        )
+                        timestamp = timestamp.replace(tzinfo=None)
+                    except Exception:
+                        timestamp = datetime.now()
+                else:
+                    timestamp = datetime.now()
+
+                if symbol and price > 0:
+                    if on_tick:
+                        on_tick({
+                            'symbol':    symbol,
+                            'price':     price,
+                            'volume':    volume,
+                            'timestamp': timestamp
+                        })
+
+                    completed_candle = candle_aggregator.add_tick(
+                        symbol, price, volume, timestamp
+                    )
+
+                    if completed_candle and on_candle:
+                        on_candle(completed_candle)
+
+                    redis_manager.set(f"realtime:{symbol}", {
+                        'price':     price,
+                        'volume':    volume,
+                        'timestamp': timestamp.isoformat()
+                    }, ttl=10)
+
+            elif msg_type == 'connected':
+                plan = data.get('plan', '')
+                _log.success(
+                    f"✅ WebSocket connection #{conn_id} confirmed connected | Plan: {plan}"
+                )
+
+            elif msg_type == 'pong':
+                _log.debug(f"🏓 WebSocket connection #{conn_id} pong received")
+
+            elif msg_type in ('heartbeat', 'ping'):
+                _log.debug(f"💓 WebSocket connection #{conn_id} heartbeat received")
+
+            elif msg_type == 'subscribed':
+                syms = data.get('symbols', [])
+                _log.success(
+                    f"✅ WebSocket connection #{conn_id} subscribed to {len(syms)} symbols"
+                )
+
+            elif msg_type == 'error':
+                error_msg = data.get('message', 'Unknown error')
+                _log.error(
+                    f"❌ WebSocket server error on connection #{conn_id}: {error_msg}"
+                )
+
+            else:
+                _log.info(
+                    f"🔍 Connection #{conn_id} — unknown message type '{msg_type}': {message}"
+                )
+
+        except json.JSONDecodeError as e:
+            _log.warning(
+                f"⚠️ Connection #{conn_id} — invalid JSON from WebSocket: {e}"
+            )
+        except Exception as e:
+            _log.error(
+                f"❌ Connection #{conn_id} — error processing WebSocket message: {e}"
+            )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SahmkClient
+# ─────────────────────────────────────────────────────────────────────────────
+
 class SahmkClient:
     """
     Full Sahmk API Client with REST + WebSocket support
 
     REST: Fetch historical OHLCV data
     WebSocket: Real-time streaming data (every second)
+             Uses MultiConnectionWebSocketManager to bypass 60-symbol limit.
     """
 
     def __init__(self):
@@ -245,15 +627,13 @@ class SahmkClient:
         self.rate_limit       = sahmk_config.get('rate_limit_per_minute', 60)
 
         # Components
-        self.rate_limiter     = SahmkRateLimiter(self.rate_limit)
+        self.rate_limiter      = SahmkRateLimiter(self.rate_limit)
         self.candle_aggregator = CandleAggregator()
 
-        # WebSocket state
-        self._ws: Optional[websocket.WebSocketApp] = None
-        self._ws_thread: Optional[threading.Thread] = None
+        # ── Multi-connection WebSocket manager (replaces single _ws) ──────────
+        self._ws_manager: Optional[MultiConnectionWebSocketManager] = None
         self._ws_running = False
         self._subscribed_symbols: List[str] = []
-        self._ws_retry_count = 0
 
         # Callbacks
         self._on_candle_complete: Optional[Callable] = None
@@ -272,7 +652,8 @@ class SahmkClient:
         self.logger.info(
             f"SahmkClient initialized | "
             f"Base URL: {self.base_url} | "
-            f"WS URL: {self.websocket_url}"
+            f"WS URL: {self.websocket_url} | "
+            f"Max symbols/connection: {MAX_SYMBOLS_PER_CONNECTION}"
         )
 
     # =============================================
@@ -406,7 +787,7 @@ class SahmkClient:
                     candles = data['results']
                 else:
                     candles = data.get('data', data.get('candles', data.get('ohlcv', [])))
-                
+
                 self.logger.info(f"📋 Extracted from dict, type = {type(candles)}, length = {len(candles) if isinstance(candles, list) else 'N/A'}")
             elif isinstance(data, list):
                 candles = data
@@ -725,204 +1106,13 @@ class SahmkClient:
         """Set callback for each tick received"""
         self._on_tick = callback
 
-    def _on_ws_message(self, ws, message: str):
-        """Handle incoming WebSocket message"""
-        try:
-            data = json.loads(message)
-
-            msg_type = data.get('type', data.get('event', ''))
-
-            if msg_type == 'quote':
-                symbol     = str(data.get('symbol', ''))
-                quote_data = data.get('data', {})
-                price      = float(quote_data.get('price', 0))
-                volume     = float(quote_data.get('volume', 0))
-
-                ts_raw = data.get('timestamp')
-                if ts_raw:
-                    try:
-                        timestamp = datetime.fromisoformat(str(ts_raw).replace('Z', '+00:00'))
-                        timestamp = timestamp.replace(tzinfo=None)
-                    except Exception:
-                        timestamp = datetime.now()
-                else:
-                    timestamp = datetime.now()
-
-                if symbol and price > 0:
-                    if self._on_tick:
-                        self._on_tick({
-                            'symbol':    symbol,
-                            'price':     price,
-                            'volume':    volume,
-                            'timestamp': timestamp
-                        })
-
-                    completed_candle = self.candle_aggregator.add_tick(
-                        symbol, price, volume, timestamp
-                    )
-
-                    if completed_candle and self._on_candle_complete:
-                        self._on_candle_complete(completed_candle)
-
-                    redis_manager.set(f"realtime:{symbol}", {
-                        'price':     price,
-                        'volume':    volume,
-                        'timestamp': timestamp.isoformat()
-                    }, ttl=10)
-
-            elif msg_type == 'connected':
-                plan = data.get('plan', '')
-                self.logger.success(f"✅ WebSocket connected | Plan: {plan}")
-
-            elif msg_type == 'pong':
-                self.logger.debug("🏓 WebSocket pong received")
-
-            elif msg_type in ('heartbeat', 'ping'):
-                self.logger.debug("💓 WebSocket heartbeat received")
-
-            elif msg_type == 'subscribed':
-                syms = data.get('symbols', [])
-                self.logger.success(f"✅ WebSocket subscribed to: {syms}")
-
-            elif msg_type == 'error':
-                error_msg = data.get('message', 'Unknown error')
-                self.logger.error(f"❌ WebSocket server error: {error_msg}")
-
-            else:
-                # Log any other message type to diagnose sector data format
-                self.logger.info(f"🔍 Received unknown WebSocket message type '{msg_type}': {message}")
-
-        except json.JSONDecodeError as e:
-            self.logger.warning(f"⚠️ Invalid JSON from WebSocket: {e}")
-        except Exception as e:
-            self.logger.error(f"❌ Error processing WebSocket message: {e}")
-
-    def _on_ws_error(self, ws, error):
-        """Handle WebSocket error"""
-        self.logger.error(f"❌ WebSocket error: {error}")
-
-    def _on_ws_close(self, ws, close_status_code, close_msg):
-        """Handle WebSocket close - auto reconnect"""
-        self.logger.warning(
-            f"⚠️ WebSocket closed | code={close_status_code} | msg={close_msg}"
-        )
-
-        if self._ws_running:
-            self._ws_retry_count += 1
-            wait_time = min(self.reconnect_delay * self._ws_retry_count, 300)
-            self.logger.info(
-                f"🔄 WebSocket reconnecting in {wait_time}s "
-                f"(attempt {self._ws_retry_count})"
-            )
-            time.sleep(wait_time)
-
-            if self._ws_running and self._subscribed_symbols:
-                self._connect_websocket(self._subscribed_symbols)
-
-    def _on_ws_open(self, ws):
-        """Handle WebSocket connection open"""
-        self.logger.success("✅ WebSocket connected to Sahmk API")
-        self._ws_retry_count = 0
-
-        if self._subscribed_symbols:
-            batch_size = 20
-            for i in range(0, len(self._subscribed_symbols), batch_size):
-                batch = self._subscribed_symbols[i:i + batch_size]
-                subscribe_msg = {
-                    'action':  'subscribe',
-                    'symbols': batch
-                }
-                ws.send(json.dumps(subscribe_msg))
-                self.logger.info(f"📡 Subscribing to batch {i//batch_size+1}: {batch}")
-
-    def _connect_websocket(self, symbols: List[str]):
-        """
-        Internal method to create WebSocket connection.
-
-        KEY FIX (403 Forbidden):
-        websocket-client automatically adds an 'Origin' header.
-        Sahmk's Cloudflare proxy blocks requests with Origin → 403.
-        Fix: pass suppress_origin=True to run_forever() to strip the header.
-
-        Also: do NOT pass any extra headers= to WebSocketApp.
-        The api_key is already in the URL query string.
-        """
-        try:
-            ws_url = self.websocket_url
-
-            # ── FIX: No extra headers — api_key is in the URL ──────────────
-            self._ws = websocket.WebSocketApp(
-                ws_url,
-                on_open=self._on_ws_open,
-                on_message=self._on_ws_message,
-                on_error=self._on_ws_error,
-                on_close=self._on_ws_close
-                # header=None  ← do NOT pass header at all
-            )
-
-            self.logger.info(f"🔌 Connecting to WebSocket: {ws_url}")
-
-            # ── FIX: suppress_origin=True removes the Origin header ─────────
-            self._ws.run_forever(
-                ping_interval=30,
-                ping_timeout=10,
-                reconnect=5,
-                suppress_origin=True   # ← THE FIX: removes Origin header
-            )
-
-        except TypeError:
-            # Older versions of websocket-client don't support suppress_origin
-            # Fall back: patch the header manually before connecting
-            self.logger.warning(
-                "⚠️ suppress_origin not supported in this websocket-client version. "
-                "Falling back to manual header patch."
-            )
-            self._connect_websocket_legacy(symbols)
-
-        except Exception as e:
-            self.logger.error(f"❌ WebSocket connection error: {e}")
-            if self._ws_running:
-                self.logger.info(f"🔄 Retrying WebSocket in {self.reconnect_delay}s")
-                time.sleep(self.reconnect_delay)
-                self._connect_websocket(symbols)
-
-    def _connect_websocket_legacy(self, symbols: List[str]):
-        """
-        Fallback for older websocket-client versions that don't support suppress_origin.
-        Manually overrides the header list to exclude Origin.
-        """
-        try:
-            ws_url = self.websocket_url
-
-            # Pass an empty header dict — this prevents websocket-client
-            # from adding the default Origin header
-            self._ws = websocket.WebSocketApp(
-                ws_url,
-                header={},          # empty dict → no Origin added
-                on_open=self._on_ws_open,
-                on_message=self._on_ws_message,
-                on_error=self._on_ws_error,
-                on_close=self._on_ws_close
-            )
-
-            self.logger.info(f"🔌 Connecting to WebSocket (legacy mode): {ws_url}")
-
-            self._ws.run_forever(
-                ping_interval=30,
-                ping_timeout=10,
-                reconnect=5
-            )
-
-        except Exception as e:
-            self.logger.error(f"❌ WebSocket legacy connection error: {e}")
-            if self._ws_running:
-                self.logger.info(f"🔄 Retrying WebSocket in {self.reconnect_delay}s")
-                time.sleep(self.reconnect_delay)
-                self._connect_websocket(symbols)
-
     def start_realtime_stream(self, symbols: List[str]):
         """
-        Start real-time WebSocket stream.
+        Start real-time WebSocket stream using multiple connections.
+
+        FIX: Splits symbols into batches of MAX_SYMBOLS_PER_CONNECTION (50)
+        and opens one WebSocket connection per batch to bypass the
+        "Subscription limit: 60 symbols per connection" error.
 
         يُصفّي رموز القطاعات (900xx) تلقائياً قبل إرسالها لـ Sahmk WebSocket،
         لأن Sahmk لا يرسل أي ticks لها رغم قبول الاشتراك.
@@ -944,70 +1134,90 @@ class SahmkClient:
 
         self._subscribed_symbols = stock_symbols
         self._ws_running         = True
-        self._ws_retry_count     = 0
+
+        # حساب عدد الاتصالات المطلوبة
+        import math
+        num_connections = math.ceil(len(stock_symbols) / MAX_SYMBOLS_PER_CONNECTION)
 
         self.logger.info(
             f"🚀 Starting real-time stream for {len(stock_symbols)} stock symbols "
-            f"(excluded {len(sector_symbols)} sector symbols): "
-            f"{stock_symbols[:5]}{'...' if len(stock_symbols) > 5 else ''}"
+            f"using {num_connections} WebSocket connection(s) "
+            f"(max {MAX_SYMBOLS_PER_CONNECTION} symbols/connection) | "
+            f"Excluded {len(sector_symbols)} sector symbols | "
+            f"First 5: {stock_symbols[:5]}{'...' if len(stock_symbols) > 5 else ''}"
         )
 
-        self._ws_thread = threading.Thread(
-            target=self._connect_websocket,
-            args=(symbols,),
-            daemon=True,
-            name="SahmkWebSocket"
+        # ── إنشاء وتشغيل MultiConnectionWebSocketManager ──────────────────
+        self._ws_manager = MultiConnectionWebSocketManager(
+            ws_url=self.websocket_url,
+            on_tick_cb=self._on_tick,
+            on_candle_cb=self._on_candle_complete,
+            candle_aggregator=self.candle_aggregator,
+            reconnect_delay=self.reconnect_delay,
         )
-        self._ws_thread.start()
+        self._ws_manager.start(stock_symbols)
 
-        self.logger.success("✅ Real-time stream started in background thread")
+        self.logger.success(
+            f"✅ Real-time stream started | "
+            f"{num_connections} WebSocket connections | "
+            f"{len(stock_symbols)} symbols total"
+        )
 
     def stop_realtime_stream(self):
-        """Stop the WebSocket stream"""
+        """Stop all WebSocket streams"""
         self._ws_running = False
 
-        if self._ws:
-            self._ws.close()
-            self._ws = None
+        if self._ws_manager:
+            self._ws_manager.stop()
+            self._ws_manager = None
 
-        if self._ws_thread and self._ws_thread.is_alive():
-            self._ws_thread.join(timeout=5)
-
-        self.logger.info("🛑 Real-time stream stopped")
+        self.logger.info("🛑 Real-time stream stopped (all connections)")
 
     def subscribe_symbols(self, symbols: List[str]):
-        """Add more symbols to the live subscription"""
+        """
+        Add more symbols to the live subscription.
+        Note: If adding symbols would exceed the per-connection limit,
+        a new connection is opened automatically via the manager restart.
+        """
         new_symbols = [s for s in symbols if s not in self._subscribed_symbols]
         if not new_symbols:
             return
 
         self._subscribed_symbols.extend(new_symbols)
+        self.logger.info(
+            f"📡 subscribe_symbols: {len(new_symbols)} new symbols added. "
+            f"Total: {len(self._subscribed_symbols)}. "
+            f"Restarting stream to apply changes..."
+        )
 
-        if self._ws and self._ws_running:
-            subscribe_msg = {
-                'action':  'subscribe',
-                'symbols': new_symbols
-            }
-            self._ws.send(json.dumps(subscribe_msg))
-            self.logger.info(f"📡 Added {len(new_symbols)} new symbols to stream")
+        # Restart stream with updated symbol list
+        if self._ws_running:
+            self.stop_realtime_stream()
+            self._ws_running = False
+            self.start_realtime_stream(self._subscribed_symbols)
 
     def is_connected(self) -> bool:
-        """Check if WebSocket is connected"""
-        return (
-            self._ws_running and
-            self._ws_thread is not None and
-            self._ws_thread.is_alive()
-        )
+        """Check if at least one WebSocket connection is active"""
+        if self._ws_manager:
+            return self._ws_manager.is_running()
+        return False
 
     def get_connection_status(self) -> Dict:
         """Get detailed connection status"""
+        manager_status = self._ws_manager.get_status() if self._ws_manager else {
+            'total_connections': 0,
+            'alive_connections': 0,
+            'running': False,
+        }
         return {
             'rest_api':             'configured',
             'api_key_loaded':       bool(self.api_key),
             'websocket_running':    self._ws_running,
             'websocket_connected':  self.is_connected(),
             'subscribed_symbols':   len(self._subscribed_symbols),
-            'retry_count':          self._ws_retry_count
+            'total_ws_connections': manager_status['total_connections'],
+            'alive_ws_connections': manager_status['alive_connections'],
+            'max_symbols_per_conn': MAX_SYMBOLS_PER_CONNECTION,
         }
 
 
