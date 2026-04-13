@@ -271,8 +271,9 @@ class _SingleWSConnection:
         # ── FIX: flag لمنع إعادة الاشتراك المزدوج عند reconnect ──────────────
         self._subscribed = False          # True بعد إرسال جميع subscribe calls
         self._subscribed_count = 0        # عدد الرموز التي تم إرسال subscribe لها
-        # ── FIX: instance-level ack counter (بدلاً من class-level المشترك) ──────
-        self._ack_count = 0               # عدد الرموز المؤكدة من السيرفر لهذا الاتصال
+        # ── FIX: instance-level ack tracking (بدلاً من class-level المشترك) ──────
+        self._acked_symbols = set()       # مجموعة الرموز المؤكدة من السيرفر لهذا الاتصال
+        self._ack_count = 0               # للتوافق
         self._ack_lock  = threading.Lock()  # thread-safety للـ ack counter
         self.logger    = logger.bind(component=f"WSConn#{conn_id}")
 
@@ -381,7 +382,10 @@ class _SingleWSConnection:
         # ── FIX v3: إعادة تعيين جميع العدادات عند كل فتح جديد (reconnect أو أول اتصال) ──
         self._subscribed       = False
         self._subscribed_count = 0
+        self._success_logged   = False
+        # استخدام set مستقل لكل اتصال لتتبع الرموز المؤكدة بدقة
         with self._ack_lock:
+            self._acked_symbols = set()
             self._ack_count = 0
 
         # ── FIX v3: استخدام الرموز المنظّفة من self.symbols (تم deduplicate في __init__) ──
@@ -459,7 +463,9 @@ class _SingleWSConnection:
         # ── FIX v3: إعادة تعيين جميع العدادات عند إغلاق الاتصال ─────────────────────
         self._subscribed       = False
         self._subscribed_count = 0
+        self._success_logged   = False
         with self._ack_lock:
+            self._acked_symbols.clear()
             self._ack_count = 0
         # _run_loop handles reconnection
 
@@ -670,40 +676,34 @@ class MultiConnectionWebSocketManager:
                 _log.debug(f"💓 WebSocket connection #{conn_id} heartbeat received")
 
             elif msg_type == 'subscribed':
-                # ── FIX v3: استخدام instance-level ack counter بدلاً من class-level ─────────────
+                # ── FIX v4: استخدام set مستقل لكل اتصال لتتبع الرموز المؤكدة بدقة ─────────────
                 syms = data.get('symbols', [])
-                unique_acked = len(set(syms))   # عدد الرموز الفريدة في هذا الـ ack
-
+                
                 if conn_instance is not None:
-                    # ── استخدام instance-level ack counter (thread-safe) ─────────────────
                     with conn_instance._ack_lock:
-                        conn_instance._ack_count += unique_acked
-                        accumulated = conn_instance._ack_count
+                        # إضافة الرموز الجديدة إلى المجموعة
+                        conn_instance._acked_symbols.update(syms)
+                        accumulated = len(conn_instance._acked_symbols)
+                        
+                        # التحقق مما إذا كان قد تم تأكيد جميع الرموز المتوقعة
+                        if total_symbols_for_conn > 0 and accumulated >= total_symbols_for_conn:
+                            # طباعة رسالة النجاح مرة واحدة فقط
+                            if not getattr(conn_instance, '_success_logged', False):
+                                _log.success(
+                                    f"✅ Connection #{conn_id} fully subscribed to "
+                                    f"{accumulated} unique symbols (expected: {total_symbols_for_conn})"
+                                )
+                                conn_instance._success_logged = True
+                        else:
+                            # لا يزال يتلقى acks من sub-batches
+                            _log.info(
+                                f"📡 Connection #{conn_id} — "
+                                f"subscribed ack: {len(set(syms))} unique symbols "
+                                f"(accumulated: {accumulated}/{total_symbols_for_conn})"
+                            )
                 else:
-                    # ── fallback: class-level (legacy) ──────────────────────────────────
-                    prev = cls._subscribed_ack_count.get(conn_id, 0)
-                    cls._subscribed_ack_count[conn_id] = prev + unique_acked
-                    accumulated = cls._subscribed_ack_count[conn_id]
-
-                if total_symbols_for_conn > 0 and accumulated >= total_symbols_for_conn:
-                    # اكتمل الاشتراك الكامل — طباعة رسالة نجاح واحدة
-                    _log.success(
-                        f"✅ Connection #{conn_id} subscribed successfully to "
-                        f"{accumulated} unique symbols"
-                    )
-                    # إعادة تعيين العداد للاتصال التالي (reconnect)
-                    if conn_instance is not None:
-                        with conn_instance._ack_lock:
-                            conn_instance._ack_count = 0
-                    else:
-                        cls._subscribed_ack_count[conn_id] = 0
-                else:
-                    # لا يزال يتلقى acks من sub-batches — تسجيل INFO للمتابعة
-                    _log.info(
-                        f"📡 Connection #{conn_id} — "
-                        f"subscribed ack: {unique_acked} unique symbols "
-                        f"(accumulated: {accumulated}/{total_symbols_for_conn})"
-                    )
+                    # Fallback (legacy)
+                    _log.info(f"📡 Connection #{conn_id} — subscribed ack: {len(set(syms))} symbols")
 
             elif msg_type == 'error':
                 error_msg = data.get('message', 'Unknown error')

@@ -558,6 +558,18 @@ class MarketReporter:
     def _on_tick_received(self, tick: Dict):
         """Callback من WebSocket thread — sync only."""
         try:
+            # تسجيل أول 5 رسائل بيانات للتأكد من استقبال البيانات
+            if not hasattr(self, '_ticks_logged_count'):
+                self._ticks_logged_count = 0
+            
+            if self._ticks_logged_count < 5:
+                self.logger.info(
+                    f"📊 [Tick {self._ticks_logged_count + 1}/5] "
+                    f"Symbol: {tick['symbol']} | Price: {tick['price']} | "
+                    f"Volume: {tick.get('volume', 0)} | Time: {tick['timestamp']}"
+                )
+                self._ticks_logged_count += 1
+
             redis_manager.set(
                 f"realtime:price:{tick['symbol']}",
                 {
