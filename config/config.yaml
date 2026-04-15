@@ -252,3 +252,8 @@ bots:
 
   dashboard_service:
     enabled: true
+  metastock_importer:
+    enabled: true
+    max_file_size_mb: 200        # الحد الأقصى لحجم ملف ZIP المقبول
+    batch_size: 500              # حجم الدفعة عند الإدراج في قاعدة البيانات
+    temp_dir: "/tmp/metastock"  # مجلد مؤقت لفك ضغط الملفات
