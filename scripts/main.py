@@ -57,25 +57,17 @@ class AlphaEngine:
         """Initialize the system"""
         logger.info("Initializing Alpha-Engine2...")
         
+        config.validate_startup_secrets()
+
         # Display configuration
         logger.info(f"Silent Mode: {config.is_silent_mode()}")
         logger.info(f"Trading Market: {config.get('market.name', 'TASI')}")
         logger.info(f"Timezone: {config.get('market.timezone', 'Asia/Riyadh')}")
         
-        # Count enabled bots
-        enabled_bots = []
-        for bot_name in [
-            'data_importer', 'technical_miner', 'market_reporter', 'scientist',
-            'strategic_analyzer', 'monitor', 'behavioral_analyzer',
-            'multiframe_confirmer', 'risk_guardian', 'consolidation_hunter',
-            'self_trainer', 'weekly_reviewer', 'health_monitor',
-            'backup_manager', 'parameter_editor', 'dashboard_service',
-            'freqai_manager', 'silent_mode_manager'
-        ]:
-            if config.is_bot_enabled(bot_name):
-                enabled_bots.append(bot_name)
-        
-        logger.info(f"Enabled bots: {len(enabled_bots)}/17")
+        # Count enabled bots dynamically from config
+        bots_cfg = config.get("bots", {}) or {}
+        enabled_bots = [name for name, bot_cfg in bots_cfg.items() if bool(bot_cfg.get("enabled", True))]
+        logger.info(f"Enabled bots: {len(enabled_bots)}/{len(bots_cfg)}")
         
         # Count enabled strategies
         enabled_strategies = []

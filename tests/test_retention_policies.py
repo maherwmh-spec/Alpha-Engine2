@@ -27,7 +27,7 @@ except ImportError:
 # ─── DSN ────────────────────────────────────────────────────────────────────
 DSN = os.environ.get(
     "DATABASE_URL",
-    "postgresql://alpha_user:alpha_password_2024@localhost:5432/alpha_engine"
+    os.getenv("DATABASE_URL", "postgresql://alpha_user:dev_db_password@localhost:5432/alpha_engine")
 )
 
 # ─── Expected Retention Policies ────────────────────────────────────────────

@@ -433,7 +433,7 @@ class MarketReporter:
             try:
                 dsn = os.environ.get(
                     "DATABASE_URL",
-                    "postgresql://alpha_user:alpha_password_2024@postgres:5432/alpha_engine"
+                    os.getenv("DATABASE_URL", "postgresql://alpha_user:dev_db_password@postgres:5432/alpha_engine")
                 )
                 DB_POOL = await asyncpg.create_pool(dsn=dsn, min_size=5, max_size=20)
                 self.logger.success("✅ Database pool initialized.")

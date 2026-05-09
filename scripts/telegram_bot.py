@@ -11,8 +11,12 @@ Sends alerts and handles commands.
 import asyncio
 import os
 import tempfile
+import zipfile
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
+
+import httpx
 
 from telegram import Update, Bot, Document
 from telegram.ext import (
@@ -114,7 +118,7 @@ class AlphaTelegramBot:
             "<b>الأوامر المتاحة:</b>\n"
             "/status - حالة النظام\n"
             "/import_tasi_data - استيراد بيانات تاسي من CSV\n"
-            "/import_metastock - استيراد بيانات MetaStock (ZIP)\n"
+            "/import_metastock - استيراد بيانات MetaStock (ZIP/DAT/MST أو URL)\n"
             "/ms_symbols - عرض رموز ملف MetaStock\n"
             "/silent_on - تفعيل الوضع الصامت\n"
             "/silent_off - إيقاف الوضع الصامت\n"
@@ -227,7 +231,7 @@ class AlphaTelegramBot:
 
         await update.message.reply_text(
             "📂 <b>استيراد بيانات MetaStock</b>\n\n"
-            "أرسل ملف <b>ZIP</b> يحتوي على بيانات MetaStock "
+            "أرسل ملف <b>ZIP/DAT/MST</b> أو رابط URL يحتوي على بيانات MetaStock "
             "(EMASTER/XMASTER + ملفات F*.DAT).\n"
             f"{filter_text}\n\n"
             "💡 <i>يمكنك تحديد رموز معينة بكتابتها بعد الأمر:\n"
@@ -244,7 +248,7 @@ class AlphaTelegramBot:
         context.user_data['ms_list_only'] = True
         await update.message.reply_text(
             "🔍 <b>عرض رموز MetaStock</b>\n\n"
-            "أرسل ملف <b>ZIP</b> يحتوي على بيانات MetaStock "
+            "أرسل ملف <b>ZIP/DAT/MST</b> أو رابط URL يحتوي على بيانات MetaStock "
             "لعرض قائمة الرموز المتاحة.",
             parse_mode='HTML'
         )
@@ -323,7 +327,7 @@ class AlphaTelegramBot:
         )
         await update.message.reply_text(text, parse_mode='HTML')
 
-    # ── معالج المستندات (ملفات ZIP) ────────────────────────────────────────
+    # ── معالج المستندات وروابط MetaStock ─────────────────────────────────
 
     async def handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
@@ -347,10 +351,10 @@ class AlphaTelegramBot:
 
         # ── التحقق من الامتداد ──────────────────────────────────────────
         ext = Path(filename).suffix.lower()
-        if ext not in ('.zip',):
+        if ext not in ('.zip', '.dat', '.mst', '.mwd'):
             await update.message.reply_text(
                 "⚠️ <b>نوع الملف غير مدعوم</b>\n\n"
-                "يُقبل فقط ملفات <b>ZIP</b> تحتوي على بيانات MetaStock.\n"
+                "تُقبل ملفات <b>ZIP/DAT/MST/MWD</b> أو روابط URL لبيانات MetaStock.\n"
                 "استخدم الأمر <code>/import_metastock</code> للمزيد من التفاصيل.",
                 parse_mode='HTML'
             )
@@ -415,7 +419,7 @@ class AlphaTelegramBot:
                 "🔍 <b>جارٍ قراءة فهرس MetaStock...</b>",
                 parse_mode='HTML'
             )
-            data_dir = extract_metastock_zip(zip_path, Path(tmp_dir) / 'extracted')
+            data_dir, _ = self._prepare_metastock_path(zip_path, tmp_dir)
             parser = MetaStockParser(data_dir)
             symbols = parser.list_symbols()
 
@@ -482,7 +486,11 @@ class AlphaTelegramBot:
             )
 
             importer = MetaStockImporter()
-            result = await importer.import_from_zip(zip_path, symbols_filter)
+            if zip_path.suffix.lower() == '.zip':
+                result = await importer.import_from_zip(zip_path, symbols_filter)
+            else:
+                data_dir, _ = self._prepare_metastock_path(zip_path, tmp_dir)
+                result = await importer.import_from_dir(data_dir, symbols_filter)
 
             await self._send_import_result(progress_msg, result)
             self.logger.success(
@@ -554,6 +562,65 @@ class AlphaTelegramBot:
             parse_mode='HTML'
         )
 
+
+    async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle MetaStock URL messages after /import_metastock or /ms_symbols."""
+        text_value = (update.message.text or "").strip()
+        parsed = urlparse(text_value)
+        if parsed.scheme not in {"http", "https"}:
+            return
+        if not (context.user_data.get('ms_symbols_filter') is not None or context.user_data.get('ms_list_only')):
+            await update.message.reply_text(
+                "ℹ️ أرسل الأمر <code>/import_metastock</code> أولاً ثم أرسل رابط ملف MetaStock.",
+                parse_mode='HTML',
+            )
+            return
+        list_only: bool = context.user_data.pop('ms_list_only', False)
+        symbols_filter = context.user_data.pop('ms_symbols_filter', None)
+        progress_msg = await update.message.reply_text("⏬ <b>جارٍ تنزيل رابط MetaStock...</b>", parse_mode='HTML')
+        with tempfile.TemporaryDirectory(prefix='tg_ms_url_') as tmp_dir:
+            filename = Path(parsed.path).name or 'metastock.zip'
+            target = Path(tmp_dir) / filename
+            try:
+                async with httpx.AsyncClient(follow_redirects=True, timeout=120) as client:
+                    async with client.stream('GET', text_value) as response:
+                        response.raise_for_status()
+                        total = int(response.headers.get('content-length', '0') or 0)
+                        if total > self.MAX_FILE_SIZE_MB * 1024 * 1024:
+                            raise ValueError(f"الملف أكبر من الحد المسموح {self.MAX_FILE_SIZE_MB} MB")
+                        written = 0
+                        with open(target, 'wb') as fh:
+                            async for chunk in response.aiter_bytes():
+                                written += len(chunk)
+                                if written > self.MAX_FILE_SIZE_MB * 1024 * 1024:
+                                    raise ValueError(f"الملف أكبر من الحد المسموح {self.MAX_FILE_SIZE_MB} MB")
+                                fh.write(chunk)
+                await progress_msg.edit_text("✅ تم تنزيل الرابط. جارٍ المعالجة...", parse_mode='HTML')
+            except Exception as exc:
+                await progress_msg.edit_text(
+                    f"❌ <b>فشل تنزيل الرابط</b>\n\n<code>{exc}</code>",
+                    parse_mode='HTML'
+                )
+                return
+            if list_only:
+                await self._handle_ms_list(update, progress_msg, target, tmp_dir)
+            else:
+                await self._handle_ms_import(update, progress_msg, target, tmp_dir, symbols_filter)
+
+    def _prepare_metastock_path(self, source_path: Path, tmp_dir: str) -> tuple[Path, bool]:
+        """Return directory path and whether it was already extracted/prepared."""
+        ext = source_path.suffix.lower()
+        if ext == '.zip':
+            return extract_metastock_zip(source_path, Path(tmp_dir) / 'extracted'), True
+        if ext in {'.dat', '.mst', '.mwd'}:
+            single_dir = Path(tmp_dir) / 'single_file_metastock'
+            single_dir.mkdir(parents=True, exist_ok=True)
+            target = single_dir / source_path.name
+            if source_path.resolve() != target.resolve():
+                target.write_bytes(source_path.read_bytes())
+            return single_dir, True
+        raise ValueError(f"صيغة MetaStock غير مدعومة: {ext}")
+
     # ------------------------------------------------------------------
     # Setup & run
     # ------------------------------------------------------------------
@@ -564,6 +631,7 @@ class AlphaTelegramBot:
         self.application.add_handler(CommandHandler("status",            self.cmd_status))
         self.application.add_handler(CommandHandler("import_tasi_data",  self.cmd_import_tasi_data))
         self.application.add_handler(CommandHandler("import_metastock",  self.cmd_import_metastock))
+        self.application.add_handler(CommandHandler("upload_ms",         self.cmd_import_metastock))
         self.application.add_handler(CommandHandler("ms_symbols",        self.cmd_ms_symbols))
         self.application.add_handler(CommandHandler("silent_on",         self.cmd_silent_on))
         self.application.add_handler(CommandHandler("silent_off",        self.cmd_silent_off))
@@ -573,6 +641,9 @@ class AlphaTelegramBot:
         # معالج الملفات المرسلة (ZIP)
         self.application.add_handler(
             MessageHandler(filters.Document.ALL, self.handle_document)
+        )
+        self.application.add_handler(
+            MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text)
         )
 
     async def run(self):

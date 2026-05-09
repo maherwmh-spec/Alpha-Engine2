@@ -7,7 +7,7 @@
 
 # ── Sahmk API ──────────────────────────────────────────────────
 sahmk:
-  api_key: "shmk_live_447cbe87839b5e9d48d663625386bb4b01bcd4ff3f68a1e8"
+  api_key: ""  # read from SAHMK_API_KEY
   base_url: "https://app.sahmk.sa/api/v1"
   websocket_url: "wss://app.sahmk.sa/ws/v1/stocks/"
   rest_timeout: 30
@@ -17,8 +17,8 @@ sahmk:
 
 # ── Telegram ───────────────────────────────────────────────────
 telegram:
-  bot_token: "8531313103:AAGif8EfDMoC_tk5bVukuZnRhxUgrgLF34I"
-  chat_id: "145514375"
+  bot_token: ""  # read from TELEGRAM_BOT_TOKEN
+  chat_id: ""  # read from TELEGRAM_CHAT_ID
   enabled: true
 
 # ── Database (TimescaleDB / PostgreSQL) ────────────────────────
@@ -27,7 +27,7 @@ database:
   port: 5432
   name: "alpha_engine"
   user: "alpha_user"
-  password: "alpha_password_2024"
+  password: ""  # read from DB_PASSWORD
   pool_size: 10
   max_overflow: 20
 
@@ -36,7 +36,7 @@ redis:
   host: "redis"
   port: 6379
   db: 0
-  password: "alpha_redis_password_2024"
+  password: ""  # read from REDIS_PASSWORD
 
 # ── Market Settings ────────────────────────────────────────────
 market:
@@ -214,11 +214,11 @@ bots:
     run_interval: 30
 
   behavioral_analyzer:
-    enabled: true
+    enabled: false  # Disabled by design - MVP not implemented yet
     run_interval: 300
 
   multiframe_confirmer:
-    enabled: true
+    enabled: false  # Disabled by design - MVP not implemented yet
     run_interval: 300
 
   risk_guardian:
@@ -234,24 +234,24 @@ bots:
     run_interval: 3600      # كل ساعة — يُحلّل 5 أسهم جديدة
 
   health_monitor:
-    enabled: true
+    enabled: false  # Disabled by design - MVP not implemented yet
     run_interval: 3600
 
   backup_manager:
-    enabled: true
+    enabled: false  # Disabled by design - MVP not implemented yet
 
   self_trainer:
-    enabled: true
+    enabled: false  # Disabled by design - MVP not implemented yet
     run_interval: 86400     # يومياً — يراجع أداء الإشارات
 
   weekly_reviewer:
-    enabled: true
+    enabled: false  # Disabled by design - MVP not implemented yet
 
   freqai_manager:
     enabled: false
 
   dashboard_service:
-    enabled: true
+    enabled: false  # Disabled by design - MVP not implemented yet
   metastock_importer:
     enabled: true
     max_file_size_mb: 200        # الحد الأقصى لحجم ملف ZIP المقبول

@@ -10,9 +10,9 @@ services:
     image: timescale/timescaledb:latest-pg15
     container_name: alpha_postgres
     environment:
-      POSTGRES_USER: alpha_user
-      POSTGRES_PASSWORD: alpha_password_2024
-      POSTGRES_DB: alpha_engine
+      POSTGRES_USER: ${DB_USER:-alpha_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+      POSTGRES_DB: ${DB_NAME:-alpha_engine}
       PGDATA: /var/lib/postgresql/data/pgdata
       TZ: Asia/Riyadh
       PGTZ: Asia/Riyadh
@@ -35,7 +35,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: alpha_redis
-    command: redis-server --appendonly yes --requirepass alpha_redis_password_2024
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
     environment:
       TZ: Asia/Riyadh
     volumes:
@@ -45,7 +45,7 @@ services:
     networks:
       - alpha_network
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "alpha_redis_password_2024", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a $$REDIS_PASSWORD ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -59,9 +59,9 @@ services:
     container_name: alpha_app
     command: python scripts/main.py
     environment:
-      - DATABASE_URL=postgresql://alpha_user:alpha_password_2024@postgres:5432/alpha_engine
-      - REDIS_URL=redis://:alpha_redis_password_2024@redis:6379/0
-      - REDIS_PASSWORD=alpha_redis_password_2024
+      - DATABASE_URL=postgresql://${DB_USER:-alpha_user}:${DB_PASSWORD:?DB_PASSWORD is required}@postgres:5432/${DB_NAME:-alpha_engine}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD is required}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_DB=0
@@ -91,9 +91,9 @@ services:
     container_name: alpha_celery_worker
     command: celery -A scripts.celery_app worker --loglevel=info --concurrency=4 --queues=default,high_priority,normal,low_priority,maintenance
     environment:
-      - DATABASE_URL=postgresql://alpha_user:alpha_password_2024@postgres:5432/alpha_engine
-      - REDIS_URL=redis://:alpha_redis_password_2024@redis:6379/0
-      - REDIS_PASSWORD=alpha_redis_password_2024
+      - DATABASE_URL=postgresql://${DB_USER:-alpha_user}:${DB_PASSWORD:?DB_PASSWORD is required}@postgres:5432/${DB_NAME:-alpha_engine}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD is required}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_DB=0
@@ -123,9 +123,9 @@ services:
     container_name: alpha_celery_beat
     command: celery -A scripts.celery_app beat --loglevel=info
     environment:
-      - DATABASE_URL=postgresql://alpha_user:alpha_password_2024@postgres:5432/alpha_engine
-      - REDIS_URL=redis://:alpha_redis_password_2024@redis:6379/0
-      - REDIS_PASSWORD=alpha_redis_password_2024
+      - DATABASE_URL=postgresql://${DB_USER:-alpha_user}:${DB_PASSWORD:?DB_PASSWORD is required}@postgres:5432/${DB_NAME:-alpha_engine}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD is required}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_DB=0
@@ -155,8 +155,8 @@ services:
     container_name: alpha_flower
     command: celery -A scripts.celery_app flower --port=5555
     environment:
-      - REDIS_URL=redis://:alpha_redis_password_2024@redis:6379/0
-      - REDIS_PASSWORD=alpha_redis_password_2024
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD is required}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_DB=0
@@ -180,9 +180,9 @@ services:
     container_name: alpha_market_reporter
     command: python -m bots.market_reporter.bot
     environment:
-      - DATABASE_URL=postgresql://alpha_user:alpha_password_2024@postgres:5432/alpha_engine
-      - REDIS_URL=redis://:alpha_redis_password_2024@redis:6379/0
-      - REDIS_PASSWORD=alpha_redis_password_2024
+      - DATABASE_URL=postgresql://${DB_USER:-alpha_user}:${DB_PASSWORD:?DB_PASSWORD is required}@postgres:5432/${DB_NAME:-alpha_engine}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD is required}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_DB=0
@@ -216,9 +216,9 @@ services:
     container_name: alpha_dashboard
     command: streamlit run dashboard/app.py --server.port=8501 --server.address=0.0.0.0
     environment:
-      - DATABASE_URL=postgresql://alpha_user:alpha_password_2024@postgres:5432/alpha_engine
-      - REDIS_URL=redis://:alpha_redis_password_2024@redis:6379/0
-      - REDIS_PASSWORD=alpha_redis_password_2024
+      - DATABASE_URL=postgresql://${DB_USER:-alpha_user}:${DB_PASSWORD:?DB_PASSWORD is required}@postgres:5432/${DB_NAME:-alpha_engine}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD is required}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_DB=0
@@ -249,9 +249,9 @@ services:
     container_name: alpha_telegram_bot
     command: python scripts/telegram_bot.py
     environment:
-      - DATABASE_URL=postgresql://alpha_user:alpha_password_2024@postgres:5432/alpha_engine
-      - REDIS_URL=redis://:alpha_redis_password_2024@redis:6379/0
-      - REDIS_PASSWORD=alpha_redis_password_2024
+      - DATABASE_URL=postgresql://${DB_USER:-alpha_user}:${DB_PASSWORD:?DB_PASSWORD is required}@postgres:5432/${DB_NAME:-alpha_engine}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD is required}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_DB=0
@@ -288,6 +288,42 @@ services:
       - "8080:8080"
     volumes:
       - ./freqtrade:/freqtrade/user_data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - alpha_network
+    restart: unless-stopped
+
+
+  # ── FastAPI Operational API ───────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: alpha_api
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000
+    environment:
+      - DATABASE_URL=postgresql://${DB_USER:-alpha_user}:${DB_PASSWORD:?DB_PASSWORD is required}@postgres:5432/${DB_NAME:-alpha_engine}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - ADMIN_API_KEY=${ADMIN_API_KEY:?ADMIN_API_KEY is required}
+      - APP_ENV=${APP_ENV:-development}
+      - PYTHONUNBUFFERED=1
+      - TZ=Asia/Riyadh
+      - PYTHONIOENCODING=utf-8
+      - LANG=ar_SA.UTF-8
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./:/app
+      - ./logs:/app/logs
+      - ./config:/app/config
     depends_on:
       postgres:
         condition: service_healthy

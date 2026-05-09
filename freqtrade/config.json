@@ -50,7 +50,7 @@
         "jwt_secret_key": "alpha_engine_jwt_secret_2024",
         "CORS_origins": [],
         "username": "admin",
-        "password": "alpha_password_2024"
+        "password": "CHANGE_ME_STRONG_DB_PASSWORD"
     },
     "bot_name": "Alpha-Engine2-FreqAI",
     "initial_state": "running",

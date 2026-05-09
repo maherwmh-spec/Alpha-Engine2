@@ -20,7 +20,7 @@ async def test_db_connection():
     import asyncpg
     dsn = os.environ.get(
         "DATABASE_URL",
-        "postgresql://alpha_user:alpha_password_2024@postgres:5432/alpha_engine"
+        os.getenv("DATABASE_URL", "postgresql://alpha_user:dev_db_password@postgres:5432/alpha_engine")
     )
     print(f"\n[1] Testing DB connection: {dsn[:50]}...")
     try:
@@ -53,7 +53,7 @@ async def test_direct_insert():
     import pytz
     dsn = os.environ.get(
         "DATABASE_URL",
-        "postgresql://alpha_user:alpha_password_2024@postgres:5432/alpha_engine"
+        os.getenv("DATABASE_URL", "postgresql://alpha_user:dev_db_password@postgres:5432/alpha_engine")
     )
     print(f"\n[2] Testing direct INSERT into ohlcv...")
     try:
@@ -122,7 +122,7 @@ async def test_candle_complete_callback():
         # تهيئة DB_POOL
         dsn = os.environ.get(
             "DATABASE_URL",
-            "postgresql://alpha_user:alpha_password_2024@postgres:5432/alpha_engine"
+            os.getenv("DATABASE_URL", "postgresql://alpha_user:dev_db_password@postgres:5432/alpha_engine")
         )
         bot_module.DB_POOL = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=3)
         print(f"    ✅ DB_POOL created for test")

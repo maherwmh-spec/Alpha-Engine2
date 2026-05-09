@@ -617,7 +617,7 @@ async def save_index_to_db(conn, candle: Dict) -> bool:
     if dsn is None:
         dsn = os.environ.get(
             'DATABASE_URL',
-            'postgresql://alpha_user:alpha_password_2024@localhost:5432/alpha_engine'
+            os.getenv("DATABASE_URL", "postgresql://alpha_user:dev_db_password@localhost:5432/alpha_engine")
         )
 
     async def _run():
@@ -643,7 +643,7 @@ if __name__ == '__main__':
 
     dsn = os.environ.get(
         'DATABASE_URL',
-        'postgresql://alpha_user:alpha_password_2024@postgres:5432/alpha_engine'
+        os.getenv("DATABASE_URL", "postgresql://alpha_user:dev_db_password@postgres:5432/alpha_engine")
     )
 
     print('\n' + '=' * 65)

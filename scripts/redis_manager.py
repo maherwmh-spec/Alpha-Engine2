@@ -42,7 +42,7 @@ def _get_redis_password() -> str:
     raise ValueError(
         "[FATAL] REDIS_PASSWORD environment variable is not set! "
         "Redis requires authentication (NOAUTH error will occur). "
-        "Set REDIS_PASSWORD=alpha_redis_password_2024 in your environment or docker-compose."
+        "Set REDIS_PASSWORD to a strong value in your environment or docker-compose."
     )
 
 

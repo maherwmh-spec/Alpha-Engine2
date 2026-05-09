@@ -31,7 +31,7 @@ Once the container is running, you can access the web interface at:
 
 - **URL**: `http://<your_server_ip>:8080`
 - **Username**: `admin`
-- **Password**: `alpha_password_2024` (as defined in `config.json`)
+- **Password**: `CHANGE_ME_STRONG_DB_PASSWORD` (as defined in `config.json`)
 
 ### 3. Backtesting
 

@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS market_data.ohlcv (
     close         DECIMAL(15, 4),
     volume        BIGINT,
     open_interest BIGINT DEFAULT 0,
+    source        VARCHAR(100) DEFAULT 'unknown',
     PRIMARY KEY (time, symbol, timeframe)
 );
 
@@ -55,7 +56,8 @@ SELECT
     MAX(high)          AS high,
     MIN(low)           AS low,
     LAST(close, time)  AS close,
-    SUM(volume)        AS volume
+    SUM(volume)        AS volume,
+    'aggregate'        AS source
 FROM market_data.ohlcv
 WHERE timeframe = '1m'
 GROUP BY time_bucket('5 minutes', time), symbol, timeframe, name
@@ -79,7 +81,8 @@ SELECT
     MAX(high)          AS high,
     MIN(low)           AS low,
     LAST(close, time)  AS close,
-    SUM(volume)        AS volume
+    SUM(volume)        AS volume,
+    'aggregate'        AS source
 FROM market_data.ohlcv
 WHERE timeframe = '1m'
 GROUP BY time_bucket('15 minutes', time), symbol, timeframe, name
@@ -103,7 +106,8 @@ SELECT
     MAX(high)          AS high,
     MIN(low)           AS low,
     LAST(close, time)  AS close,
-    SUM(volume)        AS volume
+    SUM(volume)        AS volume,
+    'aggregate'        AS source
 FROM market_data.ohlcv
 WHERE timeframe = '1m'
 GROUP BY time_bucket('30 minutes', time), symbol, timeframe, name
@@ -127,7 +131,8 @@ SELECT
     MAX(high)          AS high,
     MIN(low)           AS low,
     LAST(close, time)  AS close,
-    SUM(volume)        AS volume
+    SUM(volume)        AS volume,
+    'aggregate'        AS source
 FROM market_data.ohlcv
 WHERE timeframe = '1m'
 GROUP BY time_bucket('1 hour', time), symbol, timeframe, name
@@ -151,7 +156,8 @@ SELECT
     MAX(high)          AS high,
     MIN(low)           AS low,
     LAST(close, time)  AS close,
-    SUM(volume)        AS volume
+    SUM(volume)        AS volume,
+    'aggregate'        AS source
 FROM market_data.ohlcv
 WHERE timeframe = '1m'
 GROUP BY time_bucket('1 day', time), symbol, timeframe, name

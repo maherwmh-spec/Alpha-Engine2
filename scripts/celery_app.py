@@ -38,7 +38,7 @@ if not REDIS_PASSWORD:
     raise ValueError(
         "[FATAL] REDIS_PASSWORD environment variable is not set! "
         "Celery cannot connect to Redis without authentication. "
-        "Set REDIS_PASSWORD=alpha_redis_password_2024 in your environment."
+        "Set REDIS_PASSWORD to a strong value in your environment."
     )
 
 # ── Build Redis URLs from environment (never hardcoded) ──────────────────────

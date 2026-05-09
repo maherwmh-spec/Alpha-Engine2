@@ -56,7 +56,7 @@ st.markdown("""
 # ---------------------------------------------------------------------------
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql://alpha_user:alpha_password_2024@postgres:5432/alpha_engine"
+    os.getenv("DATABASE_URL", "postgresql://alpha_user:dev_db_password@postgres:5432/alpha_engine")
 )
 
 @st.cache_resource
