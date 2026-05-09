@@ -234,6 +234,41 @@ app.conf.beat_schedule = {
 }
 
 # ── Explicit autodiscover (belt-and-suspenders alongside include=) ────────────
+
+
+def _extract_scheduled_bot(task_name: str):
+    """Return bot name from a Celery task path like bots.<bot>.tasks.<task>."""
+    parts = task_name.split('.') if task_name else []
+    if len(parts) >= 4 and parts[0] == 'bots' and parts[2] == 'tasks':
+        return parts[1]
+    return None
+
+
+def _filter_disabled_bot_schedules(schedule: dict) -> dict:
+    """Remove periodic entries for bots explicitly disabled in config.yaml.
+
+    Backward-compatible behavior: bots missing from config are treated as enabled
+    so existing custom deployments are not silently disabled.
+    """
+    filtered = {}
+    for schedule_name, schedule_def in schedule.items():
+        task_name = schedule_def.get('task', '') if isinstance(schedule_def, dict) else ''
+        bot_name = _extract_scheduled_bot(task_name)
+        if bot_name is None:
+            filtered[schedule_name] = schedule_def
+            continue
+        if bool(config.get(f'bots.{bot_name}.enabled', True)):
+            filtered[schedule_name] = schedule_def
+        else:
+            logger.info(
+                f"[Celery] Skipping disabled bot schedule '{schedule_name}' "
+                f"({task_name}) because bots.{bot_name}.enabled=false"
+            )
+    return filtered
+
+
+app.conf.beat_schedule = _filter_disabled_bot_schedules(app.conf.beat_schedule)
+
 app.autodiscover_tasks(_discovered_packages)
 
 logger.info("Celery application initialized with authenticated Redis connection")

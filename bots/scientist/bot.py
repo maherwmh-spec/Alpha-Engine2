@@ -1430,6 +1430,8 @@ class Scientist:
 
             total_elite = 0
             objectives_run = 0
+            genetic_runs = []
+            failure_reasons = {}
 
             # ── [Phase 3] بدء حلقة التطور ──
             self.logger.info(
@@ -1448,7 +1450,7 @@ class Scientist:
                         f"{symbol} [{objective}]"
                     )
                     try:
-                        elite_count = await self._async_evolution_loop(
+                        objective_summary = await self._async_evolution_loop(
                             generator=generator,
                             evaluator=evaluator,
                             symbol=symbol,
@@ -1458,14 +1460,30 @@ class Scientist:
                             elite_ratio=elite_ratio,
                             mutation_rate=mutation_rate,
                             min_fitness_to_save=min_fitness_to_save,
+                            return_summary=True,
                         )
+                        elite_count = int(objective_summary.get("elite_saved", 0))
                         total_elite += elite_count
                         objectives_run += 1
+                        genetic_runs.append(objective_summary)
+                        failure_reasons[f"{symbol}:{objective}"] = objective_summary.get("failure_reasons", {})
                         self.logger.info(
                             f"[GeneticCycle]   ✓ {symbol} [{objective}] → "
                             f"{elite_count} elite saved (cumulative: {total_elite})"
                         )
                     except Exception as e:
+                        reason = f"error: {type(e).__name__}: {e}"
+                        failure_reasons[f"{symbol}:{objective}"] = {"error": 1, "details": [reason]}
+                        genetic_runs.append({
+                            "symbol": symbol,
+                            "objective": objective,
+                            "generations_run": 0,
+                            "population_size": population_size,
+                            "evaluated_count": 0,
+                            "elite_saved": 0,
+                            "failure_reasons": failure_reasons[f"{symbol}:{objective}"],
+                            "status": "error",
+                        })
                         self.logger.error(
                             f"❌ [GeneticCycle] Failed {symbol} [{objective}]: "
                             f"{type(e).__name__}: {e}"
@@ -1503,6 +1521,12 @@ class Scientist:
                 "objectives_run":    objectives_run,
                 "total_elite":       total_elite,
                 "elapsed_sec":       elapsed,
+                "generations_run":   generations,
+                "population_size":   population_size,
+                "evaluated_count":   sum(int(run.get("evaluated_count", 0)) for run in genetic_runs),
+                "elite_saved":       total_elite,
+                "failure_reasons":   failure_reasons,
+                "runs":              genetic_runs,
             }
             self.logger.info(
                 f"✅ [GeneticCycle] ══ DONE in {elapsed}s ══ "
@@ -1566,6 +1590,7 @@ class Scientist:
         elite_ratio: float,
         mutation_rate: float,
         min_fitness_to_save: float,
+        return_summary: bool = False,
     ) -> int:
         """
         حلقة التطور الداخلية لسهم وهدف واحد — async نقية بلا event loop يدوي.
@@ -1584,6 +1609,20 @@ class Scientist:
         )
 
         evaluated_pop = []
+        evaluated_count = 0
+        failure_reasons = {}
+
+        def _record_failure(result):
+            status = result.get("status", "error") if isinstance(result, dict) else "error"
+            if status == "ok":
+                return
+            key = "no_trades_count" if status == "no_trades" else status
+            failure_reasons[key] = failure_reasons.get(key, 0) + 1
+            detail = result.get("failure_reason", status) if isinstance(result, dict) else status
+            if detail:
+                details = failure_reasons.setdefault("details", [])
+                if len(details) < 10 and detail not in details:
+                    details.append(detail)
 
         for gen in range(1, generations + 1):
             # تعيين رقم الجيل
@@ -1598,7 +1637,10 @@ class Scientist:
             for ind, result in zip(population, results):
                 if isinstance(result, Exception):
                     ind["fitness_score"] = 0.0
+                    failure_reasons["error"] = failure_reasons.get("error", 0) + 1
                 else:
+                    evaluated_count += 1
+                    _record_failure(result)
                     ind["fitness_score"] = result.get("fitness_score", 0.0)
                     for key in [
                         "total_profit_pct", "win_rate", "total_trades",
@@ -1641,6 +1683,17 @@ class Scientist:
         self.logger.info(
             f"  💾 Saved {elite_saved} elite strategies for {symbol} [{objective}]"
         )
+        if return_summary:
+            return {
+                "symbol": symbol,
+                "objective": objective,
+                "generations_run": generations,
+                "population_size": population_size,
+                "evaluated_count": evaluated_count,
+                "elite_saved": elite_saved,
+                "failure_reasons": failure_reasons,
+                "status": "ok" if elite_saved > 0 else "completed_no_elite",
+            }
         return elite_saved
 
     def _run_evolution_loop(self, *args, **kwargs) -> int:

@@ -1,10 +1,16 @@
-"""Stub tasks for data_importer - not yet implemented"""
-from scripts.celery_app import app
+"""Celery task wrapper for the DataImporter bot."""
+import asyncio
+
 from loguru import logger
+
+from scripts.celery_app import app
+from .bot import DataImporter
 
 
 @app.task(name='bots.data_importer.tasks.run_data_importer', bind=True)
 def run_data_importer(self):
-    """Stub task for data_importer"""
-    logger.info("data_importer task stub - not yet implemented")
-    return {"status": "stub", "bot": "data_importer"}
+    """Run the real DataImporter implementation from Celery."""
+    logger.info("Starting data_importer task")
+    result = asyncio.run(DataImporter().run())
+    logger.info("data_importer task completed with status=%s", result.get("status"))
+    return result

@@ -252,6 +252,19 @@ bots:
 
   dashboard_service:
     enabled: false  # Disabled by design - MVP not implemented yet
+
+  data_importer:
+    enabled: false  # Disabled by default; Celery task wraps the real CSV importer when enabled explicitly
+
+  parameter_editor:
+    enabled: false  # Disabled by design - administrative UI workflow not scheduled in production
+
+  silent_mode_manager:
+    enabled: false  # Disabled by design - no production scheduler task
+
+  telegram_bot:
+    enabled: false  # Disabled for Celery; runtime controlled by top-level telegram.enabled and scripts/telegram_bot.py
+
   metastock_importer:
     enabled: true
     max_file_size_mb: 200        # الحد الأقصى لحجم ملف ZIP المقبول

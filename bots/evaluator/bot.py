@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import os
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -58,6 +59,9 @@ class StrategyEvaluator:
     def __init__(self, db_pool=None):
         self.logger = get_logger("StrategyEvaluator")
         self.db_pool = db_pool   # asyncpg pool (يُمرَّر من الخارج)
+        self._last_fetch_status = "ok"
+        self._last_fetch_reason = ""
+        self._last_fetch_candles_count = 0
 
     # ─────────────────────────────────────────────────────────
     # الدالة الرئيسية: تقييم شيفرة جينية كاملة
@@ -86,7 +90,9 @@ class StrategyEvaluator:
               "profit_factor":    float,
               "avg_duration_min": int,
               "candles_count":    int,
-              "status":           "ok" | "insufficient_data" | "no_trades" | "error",
+              "status":           "ok" | "db_unavailable" | "insufficient_data" | "no_trades" | "error",
+              "failure_reason":   str,
+              "no_trades_count":  int,
             }
         """
         symbol          = dna.get("symbol", "")
@@ -109,17 +115,35 @@ class StrategyEvaluator:
             "profit_factor":    0.0,
             "avg_duration_min": 0,
             "candles_count":    0,
+            "timeframe":         timeframe,
+            "failure_reason":    "",
+            "no_trades_count":   0,
             "status":           "error",
         }
 
         try:
             # ── 1. جلب البيانات من DB ──
             df = await self._fetch_candles(symbol, timeframe, candles_limit)
-            if df is None or len(df) < 50:
+            candles_count = len(df) if df is not None else self._last_fetch_candles_count
+            result_base["candles_count"] = candles_count
+            if df is None:
+                status = self._last_fetch_status if self._last_fetch_status in {"db_unavailable", "insufficient_data"} else "insufficient_data"
+                result_base["status"] = status
+                result_base["failure_reason"] = self._last_fetch_reason or status
+                self.logger.warning(
+                    f"⚠️  {status} for {symbol} [{timeframe}]: "
+                    f"{candles_count} candles ({result_base['failure_reason']})"
+                )
+                return result_base
+            if len(df) < 50:
                 result_base["status"] = "insufficient_data"
+                result_base["failure_reason"] = (
+                    f"insufficient_data: symbol={symbol}, timeframe={timeframe}, "
+                    f"candles={len(df)}, required=50"
+                )
                 self.logger.warning(
                     f"⚠️  Insufficient data for {symbol} [{timeframe}]: "
-                    f"{len(df) if df is not None else 0} candles"
+                    f"{len(df)} candles"
                 )
                 return result_base
 
@@ -137,6 +161,11 @@ class StrategyEvaluator:
             if len(trades) < MIN_TRADES:
                 result_base["status"] = "no_trades"
                 result_base["total_trades"] = len(trades)
+                result_base["no_trades_count"] = 1
+                result_base["failure_reason"] = (
+                    f"no_trades_count: symbol={symbol}, timeframe={timeframe}, "
+                    f"trades={len(trades)}, required={MIN_TRADES}"
+                )
                 self.logger.info(
                     f"📉 No sufficient trades for {symbol}: {len(trades)} < {MIN_TRADES}"
                 )
@@ -164,6 +193,7 @@ class StrategyEvaluator:
                 f"❌ Evaluation error for {symbol} [{profit_objective}]: {e}"
             )
             result_base["status"] = "error"
+            result_base["failure_reason"] = f"error: {type(e).__name__}: {e}"
             return result_base
 
     # ─────────────────────────────────────────────────────────
@@ -173,9 +203,22 @@ class StrategyEvaluator:
         self, symbol: str, timeframe: str, limit: int
     ) -> Optional[pd.DataFrame]:
         """يجلب الشموع من market_data.ohlcv."""
+        self._last_fetch_status = "ok"
+        self._last_fetch_reason = ""
+        self._last_fetch_candles_count = 0
         if self.db_pool is None:
-            # وضع التطوير: بيانات اصطناعية
-            return self._generate_synthetic_candles(limit)
+            env = os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "development")).strip().lower()
+            if env in {"dev", "development", "test", "testing", "local"}:
+                self._last_fetch_status = "synthetic"
+                self._last_fetch_reason = f"synthetic_candles_allowed_in_{env}"
+                synthetic = self._generate_synthetic_candles(limit)
+                self._last_fetch_candles_count = len(synthetic)
+                return synthetic
+            self._last_fetch_status = "db_unavailable"
+            self._last_fetch_reason = (
+                f"db_unavailable: db_pool is None and synthetic candles are blocked in env={env or 'production'}"
+            )
+            return None
 
         try:
             async with self.db_pool.acquire() as conn:
@@ -190,6 +233,10 @@ class StrategyEvaluator:
                     symbol, timeframe, limit,
                 )
             if not rows:
+                self._last_fetch_status = "insufficient_data"
+                self._last_fetch_reason = (
+                    f"insufficient_data: symbol={symbol}, timeframe={timeframe}, candles=0, required=50"
+                )
                 return None
 
             df = pd.DataFrame(rows, columns=["time", "open", "high", "low", "close", "volume"])
@@ -197,9 +244,12 @@ class StrategyEvaluator:
             for col in ["open", "high", "low", "close"]:
                 df[col] = df[col].astype(float)
             df["volume"] = df["volume"].astype(float)
+            self._last_fetch_candles_count = len(df)
             return df
 
         except Exception as e:
+            self._last_fetch_status = "db_unavailable"
+            self._last_fetch_reason = f"db_unavailable: {type(e).__name__}: {e}"
             self.logger.error(f"DB fetch error for {symbol}: {e}")
             return None
 
