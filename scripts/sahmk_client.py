@@ -745,15 +745,12 @@ class SahmkClient:
         # Load configuration
         sahmk_config = config.get('sahmk', {})
 
-        # API Key - read from config.yaml or environment variable
-        self.api_key = (
-            os.getenv('SAHMK_API_KEY') or
-            sahmk_config.get('api_key', '')
-        )
+        # API Key - read from config.yaml via ConfigManager (no .env required)
+        self.api_key = config.get_sahmk_api_key()
 
         if not self.api_key or self.api_key == 'YOUR_SAHMK_API_KEY_HERE':
-            self.logger.error("❌ SAHMK_API_KEY not configured!")
-            raise ValueError("SAHMK_API_KEY is not set in config.yaml or environment variables")
+            self.logger.error("❌ SAHMK API key not configured in config.yaml!")
+            raise ValueError("SAHMK API key is not set in config/config.yaml")
 
         self.logger.success(
             f"✅ SAHMK API Key loaded successfully: "
@@ -1040,13 +1037,9 @@ class SahmkClient:
             قائمة بجميع رموز تاسي النشطة من قاعدة البيانات
         """
         try:
-            import os
             import psycopg2
 
-            dsn = os.environ.get(
-                "DATABASE_URL",
-                os.getenv("DATABASE_URL", "postgresql://alpha_user:dev_db_password@postgres:5432/alpha_engine")
-            )
+            dsn = config.get_asyncpg_dsn()
             conn = psycopg2.connect(dsn)
             cur = conn.cursor()
             cur.execute("""

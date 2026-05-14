@@ -1,272 +1,201 @@
-# Alpha-Engine2 Configuration
-# ═══════════════════════════════════════════════════════════════
-# المبدأ الأساسي: لا قوائم ثابتة — كل شيء ديناميكي
-# الأسهم تُكتشف من DB بناءً على سيولتها التاريخية الخاصة
-# الاستراتيجيات تُحدَّد من نتائج الـ Scientist لكل سهم
-# ═══════════════════════════════════════════════════════════════
-
-# ── Sahmk API ──────────────────────────────────────────────────
 sahmk:
-  api_key: ""  # read from SAHMK_API_KEY
-  base_url: "https://app.sahmk.sa/api/v1"
-  websocket_url: "wss://app.sahmk.sa/ws/v1/stocks/"
+  api_key: shmk_live_447cbe87839b5e9d48d663625386bb4b01bcd4ff3f68a1e8
+  base_url: https://app.sahmk.sa/api/v1
+  websocket_url: wss://app.sahmk.sa/ws/v1/stocks/
   rest_timeout: 30
   websocket_reconnect_delay: 30
   max_retries: 5
   rate_limit_per_minute: 60
-
-# ── Telegram ───────────────────────────────────────────────────
 telegram:
-  bot_token: ""  # read from TELEGRAM_BOT_TOKEN
-  chat_id: ""  # read from TELEGRAM_CHAT_ID
+  bot_token: 8531313103:AAGif8EfDMoC_tk5bVukuZnRhxUgrgLF34I
+  chat_id: '145514375'
   enabled: true
-
-# ── Database (TimescaleDB / PostgreSQL) ────────────────────────
 database:
-  host: "postgres"
+  host: postgres
   port: 5432
-  name: "alpha_engine"
-  user: "alpha_user"
-  password: ""  # read from DB_PASSWORD
+  name: alpha_engine
+  user: alpha_user
+  password: alpha_password_2024
   pool_size: 10
   max_overflow: 20
-
-# ── Redis ──────────────────────────────────────────────────────
 redis:
-  host: "redis"
+  host: redis
   port: 6379
   db: 0
-  password: ""  # read from REDIS_PASSWORD
-
-# ── Market Settings ────────────────────────────────────────────
+  password: alpha_redis_password_2024
 market:
-  timezone: "Asia/Riyadh"
-  open_time: "10:00"
-  close_time: "15:00"
-  trading_days: [0, 1, 2, 3, 4]   # الأحد=0 ... الخميس=4
-
-# ── Symbol Universe (اكتشاف الأسهم ديناميكياً) ────────────────
-# لا توجد قائمة ثابتة — الأسهم تُكتشف من DB
+  timezone: Asia/Riyadh
+  open_time: '10:00'
+  close_time: '15:00'
+  trading_days:
+  - 0
+  - 1
+  - 2
+  - 3
+  - 4
 symbol_universe:
-  # مقارنة السيولة بالسيولة التاريخية للسهم نفسه (ليس بالسوق)
   activity_thresholds:
-    active: 1.0       # الحجم الحالي >= 100% من متوسطه التاريخي
-    awakening: 0.5    # الحجم الحالي >= 50% من متوسطه التاريخي
-    # أقل من 50% → DORMANT (يُتجاهل)
-
-  # نافذة حساب المتوسط التاريخي الخاص بالسهم
+    active: 1.0
+    awakening: 0.5
   historical_window_days: 30
-
-  # الحد الأدنى لعدد الشموع التاريخية قبل تصنيف السهم
   min_historical_candles: 30
-
-  # تحديث الكون كل N دقيقة
   cache_ttl_minutes: 5
-
-# ── Scientist (الاستكشاف والتحسين) ────────────────────────────
 scientist:
-  # الإطار الزمني الافتراضي للاختبار الخلفي
-  default_timeframe: "1m"
-
-  # عدد الأجيال في الخوارزمية الجينية
+  default_timeframe: 1m
   generations: 50
-
-  # حجم المجتمع في كل جيل
   population_size: 100
-
-  # الحد الأدنى المقبول لـ Sharpe Ratio
   min_sharpe_ratio: 0.5
-
-  # إعادة تحليل السهم إذا مضى أكثر من N يوم على آخر تحليل
   reanalysis_interval_days: 7
-
-  # عدد الأسهم التي يُحلّلها الـ Scientist في كل دورة
   symbols_per_run: 5
-
-# ── Genetic Engine (المحرك الجيني — Alpha-Engine v2) ────────────
 genetic_engine:
-  # عدد الأجيال لكل سهم/هدف في كل دورة
   generations: 10
-
-  # حجم المجتمع في كل جيل
   population_size: 30
-
-  # نسبة النخبة المحتفظ بها بين الأجيال
-  elite_ratio: 0.20
-
-  # معدل الطفرة (0-1)
+  elite_ratio: 0.2
   mutation_rate: 0.15
-
-  # عدد الأسهم التي يُحلّلها المحرك في كل دورة
   symbols_per_run: 3
-
-  # الحد الأدنى لـ fitness_score للحفظ في DB
   min_fitness_to_save: 0.05
-
-  # إعادة التحليل بعد N يوم
   reanalysis_days: 7
-
-# ── الأهداف الربحية الأربعة (Profit Objectives) ─────────────────
 profit_objectives:
   scalping:
-    description: "مضاربة خاطفة — صفقات سريعة جداً"
-    timeframe: "1m"
-    stoploss_range: [-0.005, -0.015]
-    roi_range: [0.005, 0.02]
+    description: مضاربة خاطفة — صفقات سريعة جداً
+    timeframe: 1m
+    stoploss_range:
+    - -0.005
+    - -0.015
+    roi_range:
+    - 0.005
+    - 0.02
     trailing_stop: true
-    fitness_formula: "win_rate×0.50 + avg_profit×0.30 + profit_factor×0.10 - drawdown×0.10"
-
+    fitness_formula: win_rate×0.50 + avg_profit×0.30 + profit_factor×0.10 - drawdown×0.10
   short_swings:
-    description: "موجات قصيرة — صفقات خلال اليوم"
-    timeframe: "5m"
-    stoploss_range: [-0.015, -0.03]
-    roi_range: [0.03, 0.08]
+    description: موجات قصيرة — صفقات خلال اليوم
+    timeframe: 5m
+    stoploss_range:
+    - -0.015
+    - -0.03
+    roi_range:
+    - 0.03
+    - 0.08
     trailing_stop: true
-    fitness_formula: "total_profit×0.40 + win_rate×0.30 + sharpe×0.20 - drawdown×0.10"
-
+    fitness_formula: total_profit×0.40 + win_rate×0.30 + sharpe×0.20 - drawdown×0.10
   medium_trends:
-    description: "موجات متوسطة — صفقات متعددة الأيام"
-    timeframe: "15m"
-    stoploss_range: [-0.03, -0.06]
-    roi_range: [0.08, 0.20]
+    description: موجات متوسطة — صفقات متعددة الأيام
+    timeframe: 15m
+    stoploss_range:
+    - -0.03
+    - -0.06
+    roi_range:
+    - 0.08
+    - 0.2
     trailing_stop: false
-    fitness_formula: "total_profit×0.50 + sharpe×0.30 - drawdown×0.20"
-
+    fitness_formula: total_profit×0.50 + sharpe×0.30 - drawdown×0.20
   momentum:
-    description: "انفجارات سعرية — صفقات زخم قوية"
-    timeframe: "5m"
-    stoploss_range: [-0.02, -0.04]
-    roi_range: [0.05, 0.15]
+    description: انفجارات سعرية — صفقات زخم قوية
+    timeframe: 5m
+    stoploss_range:
+    - -0.02
+    - -0.04
+    roi_range:
+    - 0.05
+    - 0.15
     trailing_stop: true
-    fitness_formula: "total_profit×0.60 + profit_factor×0.20 - drawdown×0.20"
-
-# ── صناديق المخاطر الأربعة (Risk Boxes) ─────────────────────────
+    fitness_formula: total_profit×0.60 + profit_factor×0.20 - drawdown×0.20
 risk_boxes:
   speculation:
-    linked_objective: "scalping"
-    description: "تخصيص منخفض جداً — مخاطر عالية"
+    linked_objective: scalping
+    description: تخصيص منخفض جداً — مخاطر عالية
     max_allocation_pct: 5
     max_open_trades: 2
-    color: "#FF4444"
-
+    color: '#FF4444'
   growth:
-    linked_objective: "short_swings"
-    description: "تخصيص متوسط — مخاطر متوسطة"
+    linked_objective: short_swings
+    description: تخصيص متوسط — مخاطر متوسطة
     max_allocation_pct: 15
     max_open_trades: 5
-    color: "#FF8C00"
-
+    color: '#FF8C00'
   investment:
-    linked_objective: "medium_trends"
-    description: "تخصيص عالٍ — مخاطر منخفضة"
+    linked_objective: medium_trends
+    description: تخصيص عالٍ — مخاطر منخفضة
     max_allocation_pct: 30
     max_open_trades: 10
-    color: "#2196F3"
-
+    color: '#2196F3'
   big_strategy:
-    linked_objective: "momentum"
-    description: "تخصيص ATR-based — استراتيجيات كبيرة"
+    linked_objective: momentum
+    description: تخصيص ATR-based — استراتيجيات كبيرة
     max_allocation_pct: 25
     max_open_trades: 3
-    color: "#4CAF50"
-
-# ── Strategic Analyzer (التحليل الاستكشافي) ──────────────────
+    color: '#4CAF50'
 strategic_analyzer:
-  # الحد الأدنى للثقة لإشارات الـ Scientist
-  min_confidence_scientist: 0.50
-
-  # الحد الأدنى للثقة للإشارات العامة (قبل الـ Scientist)
+  min_confidence_scientist: 0.5
   min_confidence_generic: 0.65
-
-  # الحد الأقصى للإشارات في كل دورة تشغيل
   max_signals_per_run: 100
-
-# ── Filters (فلاتر الجودة) ─────────────────────────────────────
 filters:
-  # الحد الأدنى لعدد الشموع قبل التحليل
   min_candles: 30
-
-  # نطاق السعر المقبول
   price:
     min: 1.0
     max: 1000.0
-
-# ── Logging ────────────────────────────────────────────────────
 logging:
-  level: "INFO"
-  rotation: "1 day"
-  retention: "30 days"
-
-# ── Bots configuration ────────────────────────────────────────
+  level: INFO
+  rotation: 1 day
+  retention: 30 days
 bots:
   strategic_analyzer:
     enabled: true
-    run_interval: 600       # كل 10 دقائق
+    run_interval: 600
     max_signals_per_run: 100
-
   technical_miner:
     enabled: true
     run_interval: 60
-    timeframes: ["1m", "5m", "15m", "1h", "1d"]
-
+    timeframes:
+    - 1m
+    - 5m
+    - 15m
+    - 1h
+    - 1d
   monitor:
     enabled: true
     run_interval: 30
-
   behavioral_analyzer:
-    enabled: false  # Disabled by design - MVP not implemented yet
+    enabled: false
     run_interval: 300
-
   multiframe_confirmer:
-    enabled: false  # Disabled by design - MVP not implemented yet
+    enabled: false
     run_interval: 300
-
   risk_guardian:
     enabled: true
     run_interval: 60
-
   consolidation_hunter:
     enabled: true
     run_interval: 300
-
   scientist:
     enabled: true
-    run_interval: 3600      # كل ساعة — يُحلّل 5 أسهم جديدة
-
-  health_monitor:
-    enabled: false  # Disabled by design - MVP not implemented yet
     run_interval: 3600
-
+  health_monitor:
+    enabled: false
+    run_interval: 3600
   backup_manager:
-    enabled: false  # Disabled by design - MVP not implemented yet
-
+    enabled: false
   self_trainer:
-    enabled: false  # Disabled by design - MVP not implemented yet
-    run_interval: 86400     # يومياً — يراجع أداء الإشارات
-
+    enabled: false
+    run_interval: 86400
   weekly_reviewer:
-    enabled: false  # Disabled by design - MVP not implemented yet
-
+    enabled: false
   freqai_manager:
     enabled: false
-
   dashboard_service:
-    enabled: false  # Disabled by design - MVP not implemented yet
-
+    enabled: false
   data_importer:
-    enabled: false  # Disabled by default; Celery task wraps the real CSV importer when enabled explicitly
-
+    enabled: false
   parameter_editor:
-    enabled: false  # Disabled by design - administrative UI workflow not scheduled in production
-
+    enabled: false
   silent_mode_manager:
-    enabled: false  # Disabled by design - no production scheduler task
-
+    enabled: false
   telegram_bot:
-    enabled: false  # Disabled for Celery; runtime controlled by top-level telegram.enabled and scripts/telegram_bot.py
-
+    enabled: false
   metastock_importer:
     enabled: true
-    max_file_size_mb: 200        # الحد الأقصى لحجم ملف ZIP المقبول
-    batch_size: 500              # حجم الدفعة عند الإدراج في قاعدة البيانات
-    temp_dir: "/tmp/metastock"  # مجلد مؤقت لفك ضغط الملفات
+    max_file_size_mb: 200
+    batch_size: 500
+    temp_dir: /tmp/metastock
+admin:
+  api_key: alpha_admin_RwSR8RfyxZ765YOjXNdLiFKNB6vPNyecx6Ctus9g3d0

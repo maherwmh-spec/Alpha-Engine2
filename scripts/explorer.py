@@ -12,7 +12,7 @@ scripts/explorer.py
 
 المميزات:
   - مستقل تماماً: لا يحتاج Redis أو قاعدة بيانات.
-  - يقرأ API Key من: env var → config.yaml.
+  - يقرأ API Key من: config/config.yaml عبر ConfigManager.
   - يدعم command line arguments كاملة.
   - يطبع Raw JSON Response كاملاً.
   - يدعم اختبار عدة أطر زمنية في جولة واحدة.
@@ -25,7 +25,6 @@ scripts/explorer.py
 
 import argparse
 import json
-import os
 import sys
 import time
 from datetime import datetime, timedelta
@@ -63,32 +62,17 @@ def _setup_logger() -> None:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _load_api_key() -> str:
-    """
-    قراءة Sahmk API Key بالأولوية التالية:
-      1. متغير البيئة SAHMK_API_KEY
-      2. config/config.yaml
-    """
-    # الأولوية 1: متغير البيئة
-    key = os.getenv("SAHMK_API_KEY", "").strip()
-    if key and key != "YOUR_SAHMK_API_KEY_HERE":
-        logger.debug(f"✅ API Key loaded from environment variable: {key[:12]}...{key[-4:]}")
-        return key
+    """قراءة Sahmk API Key من config/config.yaml عبر ConfigManager."""
+    try:
+        from config.config_manager import config
+        key = config.get_sahmk_api_key().strip()
+        if key and key != "YOUR_SAHMK_API_KEY_HERE":
+            logger.debug(f"✅ API Key loaded from config.yaml: {key[:12]}...{key[-4:]}")
+            return key
+    except Exception as e:
+        logger.warning(f"⚠️ Could not read Sahmk API key from config.yaml: {e}")
 
-    # الأولوية 2: config.yaml
-    config_path = _PROJECT_ROOT / "config" / "config.yaml"
-    if config_path.exists():
-        try:
-            import yaml
-            with open(config_path, "r", encoding="utf-8") as f:
-                cfg = yaml.safe_load(f) or {}
-            key = cfg.get("sahmk", {}).get("api_key", "").strip()
-            if key and key != "YOUR_SAHMK_API_KEY_HERE":
-                logger.debug(f"✅ API Key loaded from config.yaml: {key[:12]}...{key[-4:]}")
-                return key
-        except Exception as e:
-            logger.warning(f"⚠️ Could not read config.yaml: {e}")
-
-    logger.error("❌ SAHMK_API_KEY not found! Set it as env var or in config/config.yaml")
+    logger.error("❌ Sahmk API key not found in config/config.yaml")
     sys.exit(1)
 
 

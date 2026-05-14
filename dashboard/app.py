@@ -54,16 +54,13 @@ st.markdown("""
 # ---------------------------------------------------------------------------
 # Database
 # ---------------------------------------------------------------------------
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    os.getenv("DATABASE_URL", "postgresql://alpha_user:dev_db_password@postgres:5432/alpha_engine")
-)
+from config.config_manager import config
 
 @st.cache_resource
 def get_engine():
     """Create database engine with Asia/Riyadh timezone."""
     return create_engine(
-        DATABASE_URL,
+        config.get_database_url(),
         pool_pre_ping=True,
         connect_args={
             "options": "-c client_encoding=UTF8 -c timezone=Asia/Riyadh"

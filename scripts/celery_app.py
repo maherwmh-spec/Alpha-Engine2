@@ -22,31 +22,13 @@ sys.path.insert(0, str(project_root))
 
 from config.config_manager import config
 
-# ── Validate REDIS_PASSWORD before anything else ─────────────────────────────
-REDIS_PASSWORD = os.getenv('REDIS_PASSWORD', '').strip()
-if not REDIS_PASSWORD:
-    # Attempt to extract from REDIS_URL if set
-    _redis_url_env = os.getenv('REDIS_URL', '')
-    if _redis_url_env and '@' in _redis_url_env:
-        try:
-            _auth_part = _redis_url_env.split('@')[0]   # redis://:PASSWORD
-            REDIS_PASSWORD = _auth_part.split(':')[-1]  # PASSWORD
-        except Exception:
-            REDIS_PASSWORD = ''
+# ── Build Redis URLs from config.yaml (no .env required) ───────────────────
+REDIS_PASSWORD = config.get_redis_connection_params(db_index=0)["password"]
+_redis_host = config.get_redis_connection_params(db_index=0)["host"]
+_redis_port = str(config.get_redis_connection_params(db_index=0)["port"])
 
-if not REDIS_PASSWORD:
-    raise ValueError(
-        "[FATAL] REDIS_PASSWORD environment variable is not set! "
-        "Celery cannot connect to Redis without authentication. "
-        "Set REDIS_PASSWORD to a strong value in your environment."
-    )
-
-# ── Build Redis URLs from environment (never hardcoded) ──────────────────────
-_redis_host = os.getenv('REDIS_HOST', 'redis')
-_redis_port = os.getenv('REDIS_PORT', '6379')
-
-broker_url      = f"redis://:{REDIS_PASSWORD}@{_redis_host}:{_redis_port}/0"
-result_backend  = f"redis://:{REDIS_PASSWORD}@{_redis_host}:{_redis_port}/1"
+broker_url      = config.get_redis_url(db_index=0)
+result_backend  = config.get_redis_url(db_index=1)
 
 logger.info(
     f"[Celery] Redis broker  → redis://:{REDIS_PASSWORD[:4]}***@{_redis_host}:{_redis_port}/0"

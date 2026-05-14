@@ -24,11 +24,10 @@ try:
 except ImportError:
     ASYNCPG_AVAILABLE = False
 
+from config.config_manager import config
+
 # ─── DSN ────────────────────────────────────────────────────────────────────
-DSN = os.environ.get(
-    "DATABASE_URL",
-    os.getenv("DATABASE_URL", "postgresql://alpha_user:dev_db_password@localhost:5432/alpha_engine")
-)
+DSN = config.get_asyncpg_dsn()
 
 # ─── Expected Retention Policies ────────────────────────────────────────────
 EXPECTED_POLICIES = {

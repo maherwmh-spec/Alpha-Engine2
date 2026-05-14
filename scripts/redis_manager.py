@@ -2,48 +2,16 @@
 Alpha-Engine2 Redis Manager
 Handles Redis connections and caching operations
 
-FIX: Redis password is now read EXCLUSIVELY from the REDIS_PASSWORD
-     environment variable. If not set, a ValueError is raised immediately
-     to prevent silent NOAUTH authentication failures.
+Redis password is read from config/config.yaml so the project does not require .env.
 """
 
-import os
 import json
 import redis
 from typing import Any, Optional, List
 from datetime import timedelta
 from loguru import logger
+from config.config_manager import config
 
-
-def _get_redis_password() -> str:
-    """
-    Read Redis password from environment variables only.
-    Priority:
-      1. REDIS_PASSWORD env var (set in docker-compose)
-      2. REDIS_URL env var (parsed)
-    Raises ValueError if no password found.
-    """
-    # ── 1. REDIS_PASSWORD env var (primary source) ────────────────────────────
-    password = os.getenv('REDIS_PASSWORD', '').strip()
-    if password:
-        return password
-
-    # ── 2. Parse REDIS_URL env var ────────────────────────────────────────────
-    redis_url = os.getenv('REDIS_URL', '').strip()
-    if redis_url and '@' in redis_url:
-        try:
-            auth_part = redis_url.split('@')[0]   # redis://:PASSWORD
-            password = auth_part.split(':')[-1]   # PASSWORD
-            if password:
-                return password
-        except Exception:
-            pass
-
-    raise ValueError(
-        "[FATAL] REDIS_PASSWORD environment variable is not set! "
-        "Redis requires authentication (NOAUTH error will occur). "
-        "Set REDIS_PASSWORD to a strong value in your environment or docker-compose."
-    )
 
 
 class RedisManager:
@@ -54,13 +22,14 @@ class RedisManager:
         self._initialize()
 
     def _initialize(self):
-        """Initialize Redis connection using REDIS_PASSWORD from environment"""
+        """Initialize Redis connection using config/config.yaml"""
         try:
-            # ── Read connection params from environment ────────────────────────
-            host     = os.getenv('REDIS_HOST', 'redis')
-            port     = int(os.getenv('REDIS_PORT', '6379'))
-            db       = int(os.getenv('REDIS_DB', '0'))
-            password = _get_redis_password()
+            # ── Read connection params from config.yaml ────────────────────────────
+            params   = config.get_redis_connection_params(db_index=0)
+            host     = params['host']
+            port     = int(params['port'])
+            db       = int(params['db'])
+            password = params['password']
 
             logger.info(
                 f"[RedisManager] Connecting to redis://:{password[:4]}***@{host}:{port}/{db}"
@@ -459,7 +428,7 @@ class RedisManager:
             return {}
 
 
-# Global Redis instance — initialized with REDIS_PASSWORD from environment
+# Global Redis instance — initialized from config/config.yaml
 redis_manager = RedisManager()
 
 

@@ -1,12 +1,14 @@
-
 """
 Alpha-Engine2 Configuration Manager.
 
-Security model:
-  * No production secret is accepted from config.yaml.
-  * Secrets are read from environment variables only.
+Project-local configuration model:
+  * Sensitive project secrets are read from config/config.yaml by default.
+  * Environment variables remain supported for non-sensitive runtime options
+    such as APP_ENV, TZ and DEBUG.
+  * Environment fallback for legacy deployments is best-effort only and is not
+    required for DB_PASSWORD, REDIS_PASSWORD, TELEGRAM_BOT_TOKEN,
+    ADMIN_API_KEY or SAHMK_API_KEY.
   * Logs never print secret values.
-  * Production startup rejects placeholder or missing secrets.
 """
 from __future__ import annotations
 
@@ -17,18 +19,28 @@ from typing import Any, Optional
 import yaml
 from loguru import logger
 
-_SECRET_ENV = {
-    "DB_PASSWORD",
-    "REDIS_PASSWORD",
-    "TELEGRAM_BOT_TOKEN",
-    "TELEGRAM_CHAT_ID",
-    "SAHMK_API_KEY",
-    "ADMIN_API_KEY",
+_SECRET_CONFIG_PATHS = {
+    "DB_PASSWORD": ("database", "password"),
+    "REDIS_PASSWORD": ("redis", "password"),
+    "TELEGRAM_BOT_TOKEN": ("telegram", "bot_token"),
+    "TELEGRAM_CHAT_ID": ("telegram", "chat_id"),
+    "SAHMK_API_KEY": ("sahmk", "api_key"),
+    "ADMIN_API_KEY": ("admin", "api_key"),
 }
+
 _PLACEHOLDER_VALUES = {
-    "", "changeme", "change_me", "placeholder", "replace_me", "example",
-    "your_token_here", "your_key_here", "your_value_here",
-    "change_me_strong_db_password", "change_me_strong_redis_password",
+    "",
+    "changeme",
+    "change_me",
+    "placeholder",
+    "replace_me",
+    "example",
+    "your_token_here",
+    "your_key_here",
+    "your_value_here",
+    "your_sahmk_api_key_here",
+    "change_me_strong_db_password",
+    "change_me_strong_redis_password",
 }
 
 
@@ -78,71 +90,78 @@ class ConfigManager:
             val = val.get(k, default)
         return val
 
-    def _env(self, name: str, default: Optional[str] = None, *, secret: bool = False) -> str:
+    def _env(self, name: str, default: Optional[str] = None) -> str:
+        """Read a non-sensitive environment override with a default."""
         value = os.getenv(name)
         if value is not None and str(value).strip() != "":
             return str(value).strip()
-        if secret:
-            return ""
         return "" if default is None else str(default)
 
-    def _required_secret(self, name: str, *, production_only: bool = False) -> str:
-        value = os.getenv(name, "").strip()
-        if production_only and not self.is_production():
-            return value
+    def _secret(self, name: str, default: Optional[str] = None, *, allow_env_fallback: bool = True) -> str:
+        """Read a sensitive value from config.yaml first.
+
+        The optional environment fallback preserves compatibility with old
+        external deployments, but this project no longer requires .env or any
+        environment variable for the sensitive keys listed in
+        _SECRET_CONFIG_PATHS.
+        """
+        path = _SECRET_CONFIG_PATHS.get(name)
+        value: Any = None
+        if path:
+            value = self.get_nested(*path, default=None)
+        if not _is_placeholder(None if value is None else str(value)):
+            return str(value).strip()
+
+        if allow_env_fallback:
+            env_value = os.getenv(name, "").strip()
+            if not _is_placeholder(env_value):
+                return env_value
+
+        return "" if default is None else str(default)
+
+    def _required_secret(self, name: str) -> str:
+        value = self._secret(name)
         if _is_placeholder(value):
-            raise ValueError(f"Required secret {name} is missing or still a placeholder")
+            path = ".".join(_SECRET_CONFIG_PATHS.get(name, (name,)))
+            raise ValueError(f"Required secret {name} is missing or still a placeholder in config.yaml ({path})")
         return value
 
     def is_production(self) -> bool:
         return os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "development")).strip().lower() in {"prod", "production"}
 
     def validate_startup_secrets(self) -> None:
-        """Reject unsafe production startup configuration."""
-        if not self.is_production():
-            return
+        """Validate required secrets from config.yaml without requiring .env."""
         required = ["DB_PASSWORD", "REDIS_PASSWORD", "ADMIN_API_KEY"]
         if self.is_telegram_enabled():
             required.extend(["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"])
         if self.get("sahmk", {}).get("enabled", True):
             required.append("SAHMK_API_KEY")
-        missing = [name for name in required if _is_placeholder(os.getenv(name, ""))]
+        missing = [name for name in required if _is_placeholder(self._secret(name, allow_env_fallback=False))]
         if missing:
-            raise ValueError("Production startup blocked; missing/placeholder secrets: " + ", ".join(sorted(set(missing))))
+            raise ValueError("Startup blocked; missing/placeholder secrets in config.yaml: " + ", ".join(sorted(set(missing))))
 
     def get_database_url(self) -> str:
-        env_url = os.getenv("DATABASE_URL", "").strip()
-        if env_url:
-            return env_url.replace("postgresql://", "postgresql+psycopg2://", 1)
         db = self._config.get("database", {})
         host = self._env("DB_HOST", db.get("host", "postgres"))
         port = self._env("DB_PORT", db.get("port", 5432))
         name = self._env("DB_NAME", db.get("name", "alpha_engine"))
         user = self._env("DB_USER", db.get("user", "alpha_user"))
-        password = self._required_secret("DB_PASSWORD", production_only=True) or "dev_db_password"
+        password = self._required_secret("DB_PASSWORD")
         return f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{name}"
 
     def get_asyncpg_dsn(self) -> str:
-        env_url = os.getenv("DATABASE_URL", "").strip()
-        if env_url:
-            return env_url.replace("postgresql+psycopg2://", "postgresql://", 1)
         db = self._config.get("database", {})
         host = self._env("DB_HOST", db.get("host", "postgres"))
         port = self._env("DB_PORT", db.get("port", 5432))
         name = self._env("DB_NAME", db.get("name", "alpha_engine"))
         user = self._env("DB_USER", db.get("user", "alpha_user"))
-        password = self._required_secret("DB_PASSWORD", production_only=True) or "dev_db_password"
+        password = self._required_secret("DB_PASSWORD")
         return f"postgresql://{user}:{password}@{host}:{port}/{name}"
 
     def get_redis_url(self, db_index: int = 0) -> str:
-        redis_url = os.getenv("REDIS_URL", "").strip()
-        if redis_url:
-            if "/0" in redis_url or "/1" in redis_url:
-                return rebase_redis_db(redis_url, db_index)
-            return redis_url.rstrip("/") + f"/{db_index}"
         host = self._env("REDIS_HOST", self.get_nested("redis", "host", default="redis"))
         port = self._env("REDIS_PORT", self.get_nested("redis", "port", default=6379))
-        password = self._required_secret("REDIS_PASSWORD", production_only=True) or "dev_redis_password"
+        password = self._required_secret("REDIS_PASSWORD")
         db = self._env("REDIS_DB", db_index)
         if str(db) != str(db_index):
             db = db_index
@@ -152,21 +171,28 @@ class ConfigManager:
     def get_redis_url_for_backend(self) -> str:
         return self.get_redis_url(db_index=1)
 
+    def get_redis_connection_params(self, db_index: int = 0) -> dict:
+        host = self._env("REDIS_HOST", self.get_nested("redis", "host", default="redis"))
+        port = int(self._env("REDIS_PORT", self.get_nested("redis", "port", default=6379)))
+        configured_db = self._env("REDIS_DB", db_index)
+        db = db_index if str(configured_db) != str(db_index) else int(configured_db)
+        return {"host": host, "port": port, "db": db, "password": self._required_secret("REDIS_PASSWORD")}
+
     def get_telegram_token(self) -> str:
-        return self._env("TELEGRAM_BOT_TOKEN", secret=True)
+        return self._secret("TELEGRAM_BOT_TOKEN")
 
     def get_telegram_chat_id(self) -> str:
-        return self._env("TELEGRAM_CHAT_ID", secret=True)
+        return self._secret("TELEGRAM_CHAT_ID")
 
     def get_sahmk_api_key(self) -> str:
-        return self._env("SAHMK_API_KEY", secret=True)
+        return self._secret("SAHMK_API_KEY")
 
     def get_admin_api_key(self) -> str:
-        return self._env("ADMIN_API_KEY", secret=True)
+        return self._secret("ADMIN_API_KEY")
 
     def get_sahmk_ws_url(self) -> str:
         sahmk = self._config.get("sahmk", {})
-        base = os.getenv("SAHMK_WEBSOCKET_URL", sahmk.get("websocket_url", "wss://app.sahmk.sa/ws/v1/stocks/"))
+        base = self._env("SAHMK_WEBSOCKET_URL", sahmk.get("websocket_url", "wss://app.sahmk.sa/ws/v1/stocks/"))
         key = self.get_sahmk_api_key()
         sep = "&" if "?" in base else "?"
         if "api_key=" not in base and key:

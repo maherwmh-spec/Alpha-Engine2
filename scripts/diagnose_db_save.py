@@ -6,7 +6,7 @@ diagnose_db_save.py
 يُشغَّل داخل container market_reporter:
   docker compose exec market_reporter python3 scripts/diagnose_db_save.py
 
-FIX: Redis connection now uses REDIS_PASSWORD from environment variable.
+Redis connection now uses config/config.yaml.
 """
 
 import os
@@ -14,14 +14,12 @@ import sys
 import asyncio
 import inspect
 from datetime import datetime
+from config.config_manager import config
 
 # ── 1. اختبار الاتصال بـ DB مباشرة ─────────────────────────────────────────
 async def test_db_connection():
     import asyncpg
-    dsn = os.environ.get(
-        "DATABASE_URL",
-        os.getenv("DATABASE_URL", "postgresql://alpha_user:dev_db_password@postgres:5432/alpha_engine")
-    )
+    dsn = config.get_asyncpg_dsn()
     print(f"\n[1] Testing DB connection: {dsn[:50]}...")
     try:
         conn = await asyncpg.connect(dsn=dsn)
@@ -51,10 +49,7 @@ async def test_db_connection():
 async def test_direct_insert():
     import asyncpg
     import pytz
-    dsn = os.environ.get(
-        "DATABASE_URL",
-        os.getenv("DATABASE_URL", "postgresql://alpha_user:dev_db_password@postgres:5432/alpha_engine")
-    )
+    dsn = config.get_asyncpg_dsn()
     print(f"\n[2] Testing direct INSERT into ohlcv...")
     try:
         conn = await asyncpg.connect(dsn=dsn)
@@ -120,10 +115,7 @@ async def test_candle_complete_callback():
         import pytz
 
         # تهيئة DB_POOL
-        dsn = os.environ.get(
-            "DATABASE_URL",
-            os.getenv("DATABASE_URL", "postgresql://alpha_user:dev_db_password@postgres:5432/alpha_engine")
-        )
+        dsn = config.get_asyncpg_dsn()
         bot_module.DB_POOL = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=3)
         print(f"    ✅ DB_POOL created for test")
 
@@ -174,23 +166,16 @@ def test_redis():
     try:
         import redis as redis_lib
 
-        # ── قراءة كلمة المرور من البيئة فقط ────────────────────────────────
-        password = os.getenv('REDIS_PASSWORD', '').strip()
-        if not password:
-            redis_url = os.getenv('REDIS_URL', '')
-            if redis_url and '@' in redis_url:
-                try:
-                    auth_part = redis_url.split('@')[0]
-                    password = auth_part.split(':')[-1]
-                except Exception:
-                    password = ''
+        # ── قراءة إعداد Redis من config/config.yaml فقط ───────────────────
+        params = config.get_redis_connection_params(db_index=0)
+        password = params['password']
 
         if not password:
-            print("    ❌ REDIS_PASSWORD not set — cannot connect to authenticated Redis!")
+            print("    ❌ Redis password not set in config/config.yaml — cannot connect!")
             return
 
-        host = os.getenv('REDIS_HOST', 'redis')
-        port = int(os.getenv('REDIS_PORT', '6379'))
+        host = params['host']
+        port = int(params['port'])
 
         r = redis_lib.Redis(
             host=host,

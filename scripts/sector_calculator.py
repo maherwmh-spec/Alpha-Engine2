@@ -24,6 +24,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 from loguru import logger
+from config.config_manager import config
 
 # ─────────────────────────────────────────────────────────────────────────────
 # قاموس انتماء الأسهم للقطاعات (مصدر: Tadawul الرسمي)
@@ -615,10 +616,7 @@ async def save_index_to_db(conn, candle: Dict) -> bool:
     import asyncpg
 
     if dsn is None:
-        dsn = os.environ.get(
-            'DATABASE_URL',
-            os.getenv("DATABASE_URL", "postgresql://alpha_user:dev_db_password@localhost:5432/alpha_engine")
-        )
+        dsn = config.get_asyncpg_dsn()
 
     async def _run():
         conn = await asyncpg.connect(dsn=dsn)
@@ -641,10 +639,7 @@ if __name__ == '__main__':
     log.add(sys.stdout, level='DEBUG',
             format='<green>{time:HH:mm:ss}</green> | <level>{level:<8}</level> | {message}')
 
-    dsn = os.environ.get(
-        'DATABASE_URL',
-        os.getenv("DATABASE_URL", "postgresql://alpha_user:dev_db_password@postgres:5432/alpha_engine")
-    )
+    dsn = config.get_asyncpg_dsn()
 
     print('\n' + '=' * 65)
     print('🔍  Sector Calculator (DB-based) — Self-Test')

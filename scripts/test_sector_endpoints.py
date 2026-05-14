@@ -3,25 +3,23 @@
 اختبار endpoints مختلفة لجلب بيانات القطاعات من Sahmk API
 يُشغَّل مباشرة على الخادم لاكتشاف الـ URL الصحيح
 """
-import os
 import sys
 import json
+from pathlib import Path
 import requests
 
-# ── قراءة API Key من البيئة ──
-API_KEY = os.getenv('SAHMK_API_KEY', '')
-if not API_KEY:
-    # محاولة قراءة من config.yaml
-    try:
-        import yaml
-        with open('/app/config/config.yaml') as f:
-            cfg = yaml.safe_load(f)
-        API_KEY = cfg.get('sahmk', {}).get('api_key', '')
-    except Exception:
-        pass
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
+
+# ── قراءة API Key من config/config.yaml عبر ConfigManager ──
+try:
+    from config.config_manager import config
+    API_KEY = config.get_sahmk_api_key().strip()
+except Exception:
+    API_KEY = ''
 
 if not API_KEY:
-    print("❌ SAHMK_API_KEY not found! Set it as env var or check config.yaml")
+    print("❌ Sahmk API key not found in config/config.yaml")
     sys.exit(1)
 
 BASE = "https://app.sahmk.sa/api/v1"

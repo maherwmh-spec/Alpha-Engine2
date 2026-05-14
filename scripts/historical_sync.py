@@ -97,10 +97,7 @@ async def init_db_pool() -> Optional[asyncpg.Pool]:
     if DB_POOL is not None:
         return DB_POOL
     try:
-        dsn = os.environ.get(
-            "DATABASE_URL",
-            os.getenv("DATABASE_URL", "postgresql://alpha_user:dev_db_password@postgres:5432/alpha_engine")
-        )
+        dsn = config.get_asyncpg_dsn()
         DB_POOL = await asyncpg.create_pool(dsn=dsn, min_size=3, max_size=15)
         logger.success("✅ DB pool initialized")
         return DB_POOL

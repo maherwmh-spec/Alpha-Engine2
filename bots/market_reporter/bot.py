@@ -431,10 +431,7 @@ class MarketReporter:
         global DB_POOL
         if DB_POOL is None:
             try:
-                dsn = os.environ.get(
-                    "DATABASE_URL",
-                    os.getenv("DATABASE_URL", "postgresql://alpha_user:dev_db_password@postgres:5432/alpha_engine")
-                )
+                dsn = config.get_asyncpg_dsn()
                 DB_POOL = await asyncpg.create_pool(dsn=dsn, min_size=5, max_size=20)
                 self.logger.success("✅ Database pool initialized.")
             except Exception as e:
