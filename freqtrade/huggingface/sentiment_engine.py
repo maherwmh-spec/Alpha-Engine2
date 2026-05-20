@@ -1,88 +1,91 @@
-'''
 # -*- coding: utf-8 -*-
 """
-SentimentEngine: محرك تحليل مشاعر الأخبار المالية
+SentimentEngine: محرك تحليل مشاعر الأخبار المالية.
 
-يستخدم هذا المحرك نموذج FinBERT المدرب مسبقًا من Hugging Face لتحليل
-عناوين الأخبار وتحديد ما إذا كانت إيجابية، سلبية، أو محايدة.
+Uses FinBERT when the runtime has transformers/torch and falls back to a small,
+conservative lexical scorer when the model is unavailable. The fallback prevents
+FreqAI feature generation from failing or becoming dependent on static data.
 """
+from __future__ import annotations
 
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
-import torch
-from typing import List, Dict
+from typing import Dict, List
+
 from loguru import logger
-import numpy as np
+
+try:
+    import torch
+    from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
+    TRANSFORMERS_AVAILABLE = True
+except Exception:
+    torch = None
+    AutoTokenizer = None
+    AutoModelForSequenceClassification = None
+    TRANSFORMERS_AVAILABLE = False
+
+
+POSITIVE_TERMS = {
+    "profit", "growth", "record", "upgrade", "expansion", "partnership", "beats", "surge",
+    "positive", "strong", "stable", "improves", "adoption", "award", "contract",
+}
+NEGATIVE_TERMS = {
+    "loss", "drop", "decline", "downgrade", "concern", "weak", "negative", "lawsuit", "risk",
+    "falls", "debt", "delay", "cuts", "regulatory", "warning", "misses",
+}
+
 
 class SentimentEngine:
-    def __init__(self, model_name: str = 'ProsusAI/finbert'):
-        """
-        يقوم بتهيئة المحرك وتحميل نموذج FinBERT والمحلل (Tokenizer).
+    def __init__(self, model_name: str = "ProsusAI/finbert"):
+        self.tokenizer = None
+        self.model = None
+        self.model_name = model_name
+        if TRANSFORMERS_AVAILABLE:
+            try:
+                self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+                self.model = AutoModelForSequenceClassification.from_pretrained(model_name)
+                logger.success("sentiment_engine_initialized model={}", model_name)
+            except Exception as exc:
+                logger.warning("sentiment_engine_model_load_failed model={} error={}; using lexical fallback", model_name, exc)
+        else:
+            logger.warning("sentiment_engine_transformers_unavailable; using lexical fallback")
 
-        :param model_name: اسم نموذج تحليل المشاعر المراد استخدامه.
-        """
-        try:
-            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-            self.model = AutoModelForSequenceClassification.from_pretrained(model_name)
-            logger.success(f"✅ SentimentEngine initialized with model: {model_name}")
-        except Exception as e:
-            logger.critical(f"❌ Failed to load FinBERT model '{model_name}'. Error: {e}")
-            self.tokenizer = None
-            self.model = None
+    def _fallback_sentiment(self, headlines: List[str]) -> Dict[str, float]:
+        if not headlines:
+            return {"positive": 0.0, "negative": 0.0, "neutral": 1.0}
+        positive = 0
+        negative = 0
+        for headline in headlines:
+            words = {word.strip(".,:;!?()[]{}'\"").lower() for word in headline.split()}
+            positive += len(words & POSITIVE_TERMS)
+            negative += len(words & NEGATIVE_TERMS)
+        total = positive + negative
+        if total == 0:
+            return {"positive": 0.0, "negative": 0.0, "neutral": 1.0}
+        pos_score = positive / (total + len(headlines))
+        neg_score = negative / (total + len(headlines))
+        neutral = max(0.0, 1.0 - pos_score - neg_score)
+        return {"positive": float(pos_score), "negative": float(neg_score), "neutral": float(neutral)}
 
     def analyze_sentiment(self, headlines: List[str]) -> Dict[str, float]:
-        """
-        يحلل قائمة من عناوين الأخبار ويُرجع متوسط درجات المشاعر.
+        """يحلل قائمة من عناوين الأخبار ويرجع متوسط درجات المشاعر."""
+        clean_headlines = [str(item).strip() for item in headlines if str(item).strip()]
+        if not clean_headlines:
+            return {"positive": 0.0, "negative": 0.0, "neutral": 1.0}
 
-        :param headlines: قائمة من عناوين الأخبار (نصوص).
-        :return: قاموس يحتوي على متوسط الدرجات للمشاعر الثلاث: 'positive', 'negative', 'neutral'.
-        """
-        if not self.model or not headlines:
-            return {'positive': 0.0, 'negative': 0.0, 'neutral': 0.0}
+        if not self.model or not self.tokenizer or torch is None:
+            return self._fallback_sentiment(clean_headlines)
 
         try:
-            inputs = self.tokenizer(headlines, padding=True, truncation=True, return_tensors='pt', max_length=512)
+            inputs = self.tokenizer(clean_headlines, padding=True, truncation=True, return_tensors="pt", max_length=512)
             with torch.no_grad():
                 outputs = self.model(**inputs)
                 predictions = torch.nn.functional.softmax(outputs.logits, dim=-1)
-            
-            # حساب متوسط الدرجات لجميع العناوين
             mean_scores = predictions.mean(dim=0)
-            
-            # FinBERT يُرجع النتائج بالترتيب: positive, negative, neutral
-            result = {
-                'positive': mean_scores[0].item(),
-                'negative': mean_scores[1].item(),
-                'neutral': mean_scores[2].item()
+            return {
+                "positive": float(mean_scores[0].item()),
+                "negative": float(mean_scores[1].item()),
+                "neutral": float(mean_scores[2].item()),
             }
-            return result
-
-        except Exception as e:
-            logger.error(f"❌ Error analyzing sentiment: {e}")
-            return {'positive': 0.0, 'negative': 0.0, 'neutral': 0.0}
-
-# --- مثال للاستخدام (سيتم دمجه لاحقًا في FreqAI) ---
-if __name__ == '__main__':
-    # TODO: يجب ربط هذا بمصدر أخبار حقيقي لجلب الأخبار المتعلقة بالسهم
-    NEWS_HEADLINES = {
-        '1010': [
-            "SNB posts record profits for the fiscal year, exceeding analyst expectations.",
-            "Fitch affirms SNB's 'A-' rating with a stable outlook.",
-            "Central bank regulations might slightly impact lending margins next quarter."
-        ],
-        '2222': [
-            "Aramco announces major expansion in downstream projects.",
-            "Oil prices drop amid global demand concerns.",
-            "Aramco signs new partnership for green hydrogen development."
-        ]
-    }
-
-    engine = SentimentEngine()
-
-    if engine.model:
-        for symbol, news_list in NEWS_HEADLINES.items():
-            sentiment_scores = engine.analyze_sentiment(news_list)
-            logger.info(f"📊 Aggregated Sentiment for {symbol}:")
-            logger.info(f"  - Positive: {sentiment_scores['positive']:.4f}")
-            logger.info(f"  - Negative: {sentiment_scores['negative']:.4f}")
-            logger.info(f"  - Neutral:  {sentiment_scores['neutral']:.4f}\n")
-'''
+        except Exception as exc:
+            logger.warning("sentiment_analysis_failed error={}; using lexical fallback", exc)
+            return self._fallback_sentiment(clean_headlines)

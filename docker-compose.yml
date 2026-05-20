@@ -62,6 +62,8 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_DB=0
+      - APP_ENV=production
+      - LOG_LEVEL=INFO
       - PYTHONUNBUFFERED=1
       - TZ=Asia/Riyadh
       - PYTHONIOENCODING=utf-8
@@ -78,6 +80,12 @@ services:
         condition: service_healthy
     networks:
       - alpha_network
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"from scripts.database import db; from scripts.redis_manager import redis_manager; assert db.test_connection() and redis_manager.client.ping()\""]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
     restart: unless-stopped
 
   # ── Celery Worker ────────────────────────────────────────────
@@ -91,6 +99,8 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_DB=0
+      - APP_ENV=production
+      - LOG_LEVEL=INFO
       - PYTHONUNBUFFERED=1
       - TZ=Asia/Riyadh
       - PYTHONIOENCODING=utf-8
@@ -107,6 +117,12 @@ services:
         condition: service_healthy
     networks:
       - alpha_network
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A scripts.celery_app inspect ping -d celery@$${HOSTNAME} --timeout=10 >/dev/null 2>&1"]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 90s
     restart: unless-stopped
 
   # ── Celery Beat (Scheduler) ──────────────────────────────────
@@ -120,6 +136,8 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_DB=0
+      - APP_ENV=production
+      - LOG_LEVEL=INFO
       - PYTHONUNBUFFERED=1
       - TZ=Asia/Riyadh
       - PYTHONIOENCODING=utf-8
@@ -136,6 +154,12 @@ services:
         condition: service_healthy
     networks:
       - alpha_network
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"from scripts.redis_manager import redis_manager; assert redis_manager.client.ping()\""]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
     restart: unless-stopped
 
   # ── Flower (Celery Monitoring) ───────────────────────────────
@@ -149,6 +173,8 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_DB=0
+      - APP_ENV=production
+      - LOG_LEVEL=INFO
       - PYTHONUNBUFFERED=1
       - TZ=Asia/Riyadh
       - PYTHONIOENCODING=utf-8
@@ -172,6 +198,8 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_DB=0
+      - APP_ENV=production
+      - LOG_LEVEL=INFO
       - PYTHONUNBUFFERED=1
       - TZ=Asia/Riyadh
       - PYTHONIOENCODING=utf-8
@@ -205,6 +233,8 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_DB=0
+      - APP_ENV=production
+      - LOG_LEVEL=INFO
       - PYTHONUNBUFFERED=1
       - TZ=Asia/Riyadh
       - PYTHONIOENCODING=utf-8
@@ -235,6 +265,8 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_DB=0
+      - APP_ENV=production
+      - LOG_LEVEL=INFO
       - PYTHONUNBUFFERED=1
       - TZ=Asia/Riyadh
       - PYTHONIOENCODING=utf-8
@@ -264,6 +296,8 @@ services:
       --freqaimodel LightGBMClassifier
     environment:
       - TZ=Asia/Riyadh
+      - APP_ENV=production
+      - LOG_LEVEL=INFO
     ports:
       - "8080:8080"
     volumes:
@@ -289,7 +323,8 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_DB=0
-      - APP_ENV=development
+      - APP_ENV=production
+      - LOG_LEVEL=INFO
       - PYTHONUNBUFFERED=1
       - TZ=Asia/Riyadh
       - PYTHONIOENCODING=utf-8
@@ -307,6 +342,12 @@ services:
         condition: service_healthy
     networks:
       - alpha_network
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=10).read()\""]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
     restart: unless-stopped
 
 networks:

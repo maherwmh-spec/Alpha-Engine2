@@ -57,7 +57,7 @@ app = Celery(
     'alpha_engine',
     broker=broker_url,
     backend=result_backend,
-    include=_discovered_packages + ['scripts.sync_symbols'],  # bots + scripts tasks
+    include=_discovered_packages + ['scripts.sync_symbols', 'scripts.retention_policy'],  # bots + scripts tasks
 )
 
 # ── Celery configuration ──────────────────────────────────────────────────────
@@ -74,7 +74,12 @@ app.conf.update(
     worker_max_tasks_per_child=1000,
     task_acks_late=True,
     task_reject_on_worker_lost=True,
+    task_default_retry_delay=60,
+    task_annotations={'*': {'rate_limit': '120/m'}},
     broker_connection_retry_on_startup=True,
+    broker_connection_max_retries=None,
+    broker_heartbeat=30,
+    beat_max_loop_interval=60,
     # Explicit broker/backend URLs (redundant but ensures override)
     broker_url=broker_url,
     result_backend=result_backend,
@@ -94,6 +99,7 @@ app.conf.task_routes = {
     'bots.consolidation_hunter.*':  {'queue': 'normal'},
     'bots.health_monitor.*':        {'queue': 'normal'},
     'bots.weekly_reviewer.*':       {'queue': 'normal'},
+    'bots.freqai_manager.*':        {'queue': 'default'},
     # Genetic Engine — default queue (was low_priority, caused TimeoutError)
     'bots.scientist.*':  {'queue': 'default'},
     'bots.generator.*':  {'queue': 'default'},
@@ -204,6 +210,11 @@ app.conf.beat_schedule = {
     'backup-manager-run': {
         'task': 'bots.backup_manager.tasks.run_backup',
         'schedule': crontab(hour=2, minute=0),
+        'options': {'queue': 'maintenance'},
+    },
+    'retention-policy-run': {
+        'task': 'scripts.retention_policy.run_retention_policy',
+        'schedule': crontab(hour=4, minute=30),
         'options': {'queue': 'maintenance'},
     },
 
