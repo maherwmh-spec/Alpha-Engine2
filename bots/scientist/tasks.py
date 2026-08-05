@@ -37,21 +37,28 @@ def _apply_unified_loop_patch() -> None:
             )
 
         Scientist._async_evolution_loop = _async_evolution_loop  # type: ignore[method-assign]
-        logger.info("Scientist._async_evolution_loop patched → unified_loop (elite seed + active promote)")
+        logger.info("Scientist._async_evolution_loop patched → unified_loop")
     except Exception as exc:
         logger.warning(f"unified_loop patch skipped: {exc}")
 
 
+def _apply_evaluator_patches() -> None:
+    try:
+        from bots.evaluator.condition_ext import apply_evaluator_patches
+
+        apply_evaluator_patches()
+        logger.info("Evaluator indicator/condition patches applied")
+    except Exception as exc:
+        logger.warning(f"evaluator patches skipped: {exc}")
+
+
 _apply_unified_loop_patch()
+_apply_evaluator_patches()
 
 
 @app.task(name='bots.scientist.tasks.run_scientist', bind=True, max_retries=1)
 def run_scientist(self):
-    """DEPRECATED: legacy DEAP path is isolated.
-
-    Kept registered so old beat entries / manual calls do not crash.
-    Redirects to the unified genetic cycle with conservative settings.
-    """
+    """DEPRECATED: legacy DEAP path is isolated. Redirects to run_genetic_cycle."""
     logger.warning(
         "run_scientist is DEPRECATED (DEAP path isolated). "
         "Redirecting to run_genetic_cycle. See docs/DEAP_TRANSFER_MAP.md"
@@ -70,20 +77,17 @@ def run_genetic_cycle(
     generations: int = 15,
     population_size: int = 30,
 ):
-    """Unified Genetic Engine cycle (Generator + Evaluator).
-
-    Discovers and saves elite/active strategies for TASI symbols.
-    This is the only scheduled scientist path after Phase 1 unification.
-    """
+    """Unified Genetic Engine cycle (Generator + Evaluator)."""
     try:
         _apply_unified_loop_patch()
+        _apply_evaluator_patches()
         logger.info(
             f"Starting UNIFIED run_genetic_cycle symbols={symbols}, "
             f"generations={generations}, pop_size={population_size}"
         )
         from bots.scientist.bot import Scientist
-        scientist = Scientist()
 
+        scientist = Scientist()
         result = scientist.run_genetic_cycle(
             symbols=symbols,
             generations=generations,
@@ -92,7 +96,6 @@ def run_genetic_cycle(
             mutation_rate=0.15,
             min_fitness_to_save=0.05,
         )
-
         logger.success(
             f"run_genetic_cycle completed: "
             f"{result.get('total_elite')} elite across "
