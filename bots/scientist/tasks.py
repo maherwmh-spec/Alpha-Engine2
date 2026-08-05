@@ -3,6 +3,48 @@ from scripts.celery_app import app
 from loguru import logger
 
 
+def _apply_unified_loop_patch() -> None:
+    """Replace Scientist._async_evolution_loop with seeded+promote unified path."""
+    try:
+        from bots.scientist.bot import Scientist
+        from bots.scientist.unified_loop import run_evolution_loop
+
+        async def _async_evolution_loop(
+            self,
+            generator,
+            evaluator,
+            symbol: str,
+            objective: str,
+            generations: int,
+            population_size: int,
+            elite_ratio: float,
+            mutation_rate: float,
+            min_fitness_to_save: float,
+            return_summary: bool = False,
+        ):
+            return await run_evolution_loop(
+                generator=generator,
+                evaluator=evaluator,
+                symbol=symbol,
+                objective=objective,
+                generations=generations,
+                population_size=population_size,
+                elite_ratio=elite_ratio,
+                mutation_rate=mutation_rate,
+                min_fitness_to_save=min_fitness_to_save,
+                return_summary=return_summary,
+                db_pool=getattr(evaluator, "db_pool", None),
+            )
+
+        Scientist._async_evolution_loop = _async_evolution_loop  # type: ignore[method-assign]
+        logger.info("Scientist._async_evolution_loop patched → unified_loop (elite seed + active promote)")
+    except Exception as exc:
+        logger.warning(f"unified_loop patch skipped: {exc}")
+
+
+_apply_unified_loop_patch()
+
+
 @app.task(name='bots.scientist.tasks.run_scientist', bind=True, max_retries=1)
 def run_scientist(self):
     """DEPRECATED: legacy DEAP path is isolated.
@@ -34,6 +76,7 @@ def run_genetic_cycle(
     This is the only scheduled scientist path after Phase 1 unification.
     """
     try:
+        _apply_unified_loop_patch()
         logger.info(
             f"Starting UNIFIED run_genetic_cycle symbols={symbols}, "
             f"generations={generations}, pop_size={population_size}"
