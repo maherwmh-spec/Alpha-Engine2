@@ -7,6 +7,8 @@ so that new bots are picked up without touching this file.
 
 FIX: Redis authentication enforced via REDIS_PASSWORD environment variable.
      broker uses db/0, result_backend uses db/1 for separation.
+
+Phase 1: Legacy DEAP scientist-run schedule removed. Unified path is genetic-engine-run.
 """
 
 import os
@@ -38,8 +40,6 @@ logger.info(
 )
 
 # ── Dynamic bot discovery ─────────────────────────────────────────────────────
-# Scans bots/<name>/tasks.py at import time — works both locally and in Docker
-# because the working directory is always the project root (/app).
 _bots_dir = project_root / 'bots'
 _discovered_packages = sorted([
     f'bots.{d.name}.tasks'
@@ -57,7 +57,7 @@ app = Celery(
     'alpha_engine',
     broker=broker_url,
     backend=result_backend,
-    include=_discovered_packages + ['scripts.sync_symbols', 'scripts.retention_policy'],  # bots + scripts tasks
+    include=_discovered_packages + ['scripts.sync_symbols', 'scripts.retention_policy'],
 )
 
 # ── Celery configuration ──────────────────────────────────────────────────────
@@ -68,8 +68,8 @@ app.conf.update(
     timezone='Asia/Riyadh',
     enable_utc=True,
     task_track_started=True,
-    task_time_limit=30 * 60,          # 30 minutes hard limit
-    task_soft_time_limit=25 * 60,     # 25 minutes soft limit
+    task_time_limit=30 * 60,
+    task_soft_time_limit=25 * 60,
     worker_prefetch_multiplier=1,
     worker_max_tasks_per_child=1000,
     task_acks_late=True,
@@ -80,14 +80,11 @@ app.conf.update(
     broker_connection_max_retries=None,
     broker_heartbeat=30,
     beat_max_loop_interval=60,
-    # Explicit broker/backend URLs (redundant but ensures override)
     broker_url=broker_url,
     result_backend=result_backend,
 )
 
 # ── Task routes ───────────────────────────────────────────────────────────────
-# All scientist/generator/evaluator tasks go to 'default' queue so the worker
-# picks them up without needing a dedicated low_priority consumer.
 app.conf.task_routes = {
     'bots.technical_miner.*': {'queue': 'high_priority'},
     'bots.monitor.*':         {'queue': 'high_priority'},
@@ -100,11 +97,9 @@ app.conf.task_routes = {
     'bots.health_monitor.*':        {'queue': 'normal'},
     'bots.weekly_reviewer.*':       {'queue': 'normal'},
     'bots.freqai_manager.*':        {'queue': 'default'},
-    # Genetic Engine — default queue (was low_priority, caused TimeoutError)
     'bots.scientist.*':  {'queue': 'default'},
     'bots.generator.*':  {'queue': 'default'},
     'bots.evaluator.*':  {'queue': 'default'},
-    # Maintenance
     'bots.self_trainer.*':    {'queue': 'low_priority'},
     'bots.backup_manager.*':  {'queue': 'maintenance'},
 }
@@ -112,7 +107,6 @@ app.conf.task_routes = {
 # ── Beat schedule (periodic tasks) ───────────────────────────────────────────
 app.conf.beat_schedule = {
 
-    # ── High priority ────────────────────────────────────────────────────────
     'technical-miner-run': {
         'task': 'bots.technical_miner.tasks.run_technical_miner',
         'schedule': 60.0,
@@ -129,7 +123,6 @@ app.conf.beat_schedule = {
         'options': {'queue': 'high_priority'},
     },
 
-    # ── Normal ───────────────────────────────────────────────────────────────
     'market-reporter-run': {
         'task': 'bots.market_reporter.tasks.run_market_reporter',
         'schedule': 300.0,
@@ -171,42 +164,31 @@ app.conf.beat_schedule = {
         'options': {'queue': 'normal'},
     },
 
-    # ── Genetic Engine (default queue) ───────────────────────────────────────────────
-    'scientist-run': {
-        'task': 'bots.scientist.tasks.run_scientist',
-        'schedule': 3600.0,
-        'options': {'queue': 'default'},
-    },
-    # المحرك الجيني: مرة واحدة يومياً الساعة 18:00 بتوقيت Asia/Riyadh
+    # ── Unified Genetic Engine ONLY (Phase 1) ───────────────────────────────
+    # Legacy DEAP scientist-run schedule REMOVED. See docs/DEAP_TRANSFER_MAP.md
     'genetic-engine-run': {
         'task': 'bots.scientist.tasks.run_genetic_cycle',
         'schedule': crontab(hour=18, minute=0),
         'options': {'queue': 'default'},
     },
 
-    # ── Low priority ─────────────────────────────────────────────────────
-    # المدرب الذاتي: مرة واحدة يومياً الساعة 02:00 بتوقيت Asia/Riyadh
     'self-trainer-run': {
         'task': 'bots.self_trainer.tasks.run_self_trainer',
         'schedule': crontab(hour=2, minute=0),
         'options': {'queue': 'low_priority'},
     },
-    # مدير FreqAI: مرة واحدة يومياً الساعة 03:00 بتوقيت Asia/Riyadh — طابور 'default'
     'freqai-manager-run': {
         'task': 'bots.freqai_manager.tasks.run_freqai_manager',
         'schedule': crontab(hour=3, minute=0),
         'options': {'queue': 'default'},
     },
 
-    # ── Symbol Sync (daily) ────────────────────────────────────────────────────────────────────────────────────────────
-    # يعمل يومياً الساعة 07:00 KSA (قبل فتح السوق بساعة)
     'sync-tasi-symbols': {
         'task': 'scripts.sync_symbols.sync_symbols_task',
         'schedule': crontab(hour=7, minute=0),
         'options': {'queue': 'default'},
     },
 
-    # ── Maintenance ─────────────────────────────────────────────────────────────────────────────────
     'backup-manager-run': {
         'task': 'bots.backup_manager.tasks.run_backup',
         'schedule': crontab(hour=2, minute=0),
@@ -218,7 +200,6 @@ app.conf.beat_schedule = {
         'options': {'queue': 'maintenance'},
     },
 
-    # ── Alerts ───────────────────────────────────────────────────────────────
     'send-pending-alerts': {
         'task': 'scripts.telegram_bot.send_pending_alerts',
         'schedule': 60.0,
@@ -226,11 +207,8 @@ app.conf.beat_schedule = {
     },
 }
 
-# ── Explicit autodiscover (belt-and-suspenders alongside include=) ────────────
-
 
 def _extract_scheduled_bot(task_name: str):
-    """Return bot name from a Celery task path like bots.<bot>.tasks.<task>."""
     parts = task_name.split('.') if task_name else []
     if len(parts) >= 4 and parts[0] == 'bots' and parts[2] == 'tasks':
         return parts[1]
@@ -238,11 +216,6 @@ def _extract_scheduled_bot(task_name: str):
 
 
 def _filter_disabled_bot_schedules(schedule: dict) -> dict:
-    """Remove periodic entries for bots explicitly disabled in config.yaml.
-
-    Backward-compatible behavior: bots missing from config are treated as enabled
-    so existing custom deployments are not silently disabled.
-    """
     filtered = {}
     for schedule_name, schedule_def in schedule.items():
         task_name = schedule_def.get('task', '') if isinstance(schedule_def, dict) else ''
@@ -269,13 +242,6 @@ logger.info("Celery application initialized with authenticated Redis connection"
 
 @app.task(bind=True)
 def debug_task(self, *args, **kwargs):
-    """
-    Debug task to test Celery connectivity.
-    Usage:
-        debug_task.apply_async()
-        debug_task.apply_async(args=['Hello World'])
-        debug_task.apply_async(kwargs={'message': 'test'})
-    """
     msg = args[0] if args else kwargs.get('message', 'no message')
     logger.info(f'Request: {self.request!r} | message={msg}')
     return f'Debug task completed: {msg}'
