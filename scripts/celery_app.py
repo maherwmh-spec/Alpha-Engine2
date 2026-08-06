@@ -5,8 +5,9 @@ Handles distributed task processing and scheduling
 Dynamic autodiscovery: automatically finds all bots/*/tasks.py
 so that new bots are picked up without touching this file.
 
-Phase 1: Legacy DEAP scientist-run schedule removed. Unified path is genetic-engine-run.
-Phase 2: stock_personality scheduled at 17:30 before genetic-engine-run 18:00.
+Phase 1: Unified genetic-engine-run at 18:00 (DEAP schedule removed).
+Phase 2: stock_personality at 17:30.
+Phase 3: feature_engineer 16:45, sentiment_analyzer 17:00.
 """
 
 import os
@@ -89,6 +90,8 @@ app.conf.task_routes = {
     'bots.health_monitor.*':        {'queue': 'normal'},
     'bots.weekly_reviewer.*':       {'queue': 'normal'},
     'bots.stock_personality.*':     {'queue': 'normal'},
+    'bots.feature_engineer.*':      {'queue': 'normal'},
+    'bots.sentiment_analyzer.*':    {'queue': 'normal'},
     'bots.freqai_manager.*':        {'queue': 'default'},
     'bots.scientist.*':  {'queue': 'default'},
     'bots.generator.*':  {'queue': 'default'},
@@ -153,6 +156,18 @@ app.conf.beat_schedule = {
     'weekly-reviewer-run': {
         'task': 'bots.weekly_reviewer.tasks.run_weekly_reviewer',
         'schedule': crontab(day_of_week=0, hour=9, minute=0),
+        'options': {'queue': 'normal'},
+    },
+
+    # Phase 3 nightly pipeline (before personality + genetic)
+    'feature-engineer-run': {
+        'task': 'bots.feature_engineer.tasks.run_feature_engineer',
+        'schedule': crontab(hour=16, minute=45),
+        'options': {'queue': 'normal'},
+    },
+    'sentiment-analyzer-run': {
+        'task': 'bots.sentiment_analyzer.tasks.run_sentiment_analyzer',
+        'schedule': crontab(hour=17, minute=0),
         'options': {'queue': 'normal'},
     },
 
