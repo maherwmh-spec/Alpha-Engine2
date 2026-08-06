@@ -5,10 +5,8 @@ Handles distributed task processing and scheduling
 Dynamic autodiscovery: automatically finds all bots/*/tasks.py
 so that new bots are picked up without touching this file.
 
-FIX: Redis authentication enforced via REDIS_PASSWORD environment variable.
-     broker uses db/0, result_backend uses db/1 for separation.
-
 Phase 1: Legacy DEAP scientist-run schedule removed. Unified path is genetic-engine-run.
+Phase 2: stock_personality scheduled at 17:30 before genetic-engine-run 18:00.
 """
 
 import os
@@ -18,13 +16,11 @@ from loguru import logger
 import sys
 from pathlib import Path
 
-# ── Project root on sys.path ─────────────────────────────────────────────────
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from config.config_manager import config
 
-# ── Build Redis URLs from config.yaml (no .env required) ───────────────────
 REDIS_PASSWORD = config.get_redis_connection_params(db_index=0)["password"]
 _redis_host = config.get_redis_connection_params(db_index=0)["host"]
 _redis_port = str(config.get_redis_connection_params(db_index=0)["port"])
@@ -39,7 +35,6 @@ logger.info(
     f"[Celery] Redis backend → redis://:{REDIS_PASSWORD[:4]}***@{_redis_host}:{_redis_port}/1"
 )
 
-# ── Dynamic bot discovery ─────────────────────────────────────────────────────
 _bots_dir = project_root / 'bots'
 _discovered_packages = sorted([
     f'bots.{d.name}.tasks'
@@ -52,7 +47,6 @@ logger.info(
     + ", ".join(_discovered_packages)
 )
 
-# ── Celery app ────────────────────────────────────────────────────────────────
 app = Celery(
     'alpha_engine',
     broker=broker_url,
@@ -60,7 +54,6 @@ app = Celery(
     include=_discovered_packages + ['scripts.sync_symbols', 'scripts.retention_policy'],
 )
 
-# ── Celery configuration ──────────────────────────────────────────────────────
 app.conf.update(
     task_serializer='json',
     accept_content=['json'],
@@ -84,7 +77,6 @@ app.conf.update(
     result_backend=result_backend,
 )
 
-# ── Task routes ───────────────────────────────────────────────────────────────
 app.conf.task_routes = {
     'bots.technical_miner.*': {'queue': 'high_priority'},
     'bots.monitor.*':         {'queue': 'high_priority'},
@@ -96,6 +88,7 @@ app.conf.task_routes = {
     'bots.consolidation_hunter.*':  {'queue': 'normal'},
     'bots.health_monitor.*':        {'queue': 'normal'},
     'bots.weekly_reviewer.*':       {'queue': 'normal'},
+    'bots.stock_personality.*':     {'queue': 'normal'},
     'bots.freqai_manager.*':        {'queue': 'default'},
     'bots.scientist.*':  {'queue': 'default'},
     'bots.generator.*':  {'queue': 'default'},
@@ -104,7 +97,6 @@ app.conf.task_routes = {
     'bots.backup_manager.*':  {'queue': 'maintenance'},
 }
 
-# ── Beat schedule (periodic tasks) ───────────────────────────────────────────
 app.conf.beat_schedule = {
 
     'technical-miner-run': {
@@ -164,8 +156,14 @@ app.conf.beat_schedule = {
         'options': {'queue': 'normal'},
     },
 
-    # ── Unified Genetic Engine ONLY (Phase 1) ───────────────────────────────
-    # Legacy DEAP scientist-run schedule REMOVED. See docs/DEAP_TRANSFER_MAP.md
+    # Phase 2: personality before genetic discovery
+    'stock-personality-run': {
+        'task': 'bots.stock_personality.tasks.run_stock_personality',
+        'schedule': crontab(hour=17, minute=30),
+        'options': {'queue': 'normal'},
+    },
+
+    # Unified Genetic Engine ONLY (Phase 1)
     'genetic-engine-run': {
         'task': 'bots.scientist.tasks.run_genetic_cycle',
         'schedule': crontab(hour=18, minute=0),
