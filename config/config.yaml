@@ -170,6 +170,11 @@ bots:
   scientist:
     enabled: true
     run_interval: 3600
+  stock_personality:
+    enabled: true
+    benchmark_symbol: '90001'
+    timeframe: 1d
+    max_lookback_days: 252
   health_monitor:
     enabled: false
     run_interval: 3600
