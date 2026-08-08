@@ -8,6 +8,7 @@ so that new bots are picked up without touching this file.
 Phase 1: Unified genetic-engine-run at 18:00 (DEAP schedule removed).
 Phase 2: stock_personality at 17:30.
 Phase 3: feature_engineer 16:45, sentiment_analyzer 17:00.
+Phase 4: watchlist_generator at 07:30 (morning Telegram list).
 """
 
 import os
@@ -92,6 +93,7 @@ app.conf.task_routes = {
     'bots.stock_personality.*':     {'queue': 'normal'},
     'bots.feature_engineer.*':      {'queue': 'normal'},
     'bots.sentiment_analyzer.*':    {'queue': 'normal'},
+    'bots.watchlist_generator.*':   {'queue': 'normal'},
     'bots.freqai_manager.*':        {'queue': 'default'},
     'bots.scientist.*':  {'queue': 'default'},
     'bots.generator.*':  {'queue': 'default'},
@@ -183,6 +185,13 @@ app.conf.beat_schedule = {
         'task': 'bots.scientist.tasks.run_genetic_cycle',
         'schedule': crontab(hour=18, minute=0),
         'options': {'queue': 'default'},
+    },
+
+    # Phase 4: morning watchlist + Telegram
+    'watchlist-generator-run': {
+        'task': 'bots.watchlist_generator.tasks.run_watchlist_generator',
+        'schedule': crontab(hour=7, minute=30),
+        'options': {'queue': 'normal'},
     },
 
     'self-trainer-run': {
