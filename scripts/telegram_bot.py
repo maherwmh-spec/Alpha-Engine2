@@ -2,10 +2,7 @@
 Alpha-Engine2 Telegram Bot
 Sends alerts and handles commands.
 
-التحديثات:
-  - إضافة /import_metastock : استيراد بيانات MetaStock عبر رفع ملف ZIP
-  - إضافة /ms_symbols       : عرض قائمة الرموز في ملف MetaStock
-  - معالج المستندات         : يقبل ملفات ZIP/DAT ترسل مباشرة للبوت
+Phase 5: /analyze /watchlist /watching /unwatch /paper /paper_close /papers
 """
 
 import asyncio
@@ -40,7 +37,6 @@ from scripts.metastock_parser import MetaStockParser, extract_metastock_zip
 class AlphaTelegramBot:
     """Telegram bot for alerts and commands"""
 
-    # الحد الأقصى لحجم الملف المقبول (200 MB)
     MAX_FILE_SIZE_MB = 200
 
     def __init__(self):
@@ -57,7 +53,6 @@ class AlphaTelegramBot:
         self.application = None
 
     async def send_message(self, text: str, parse_mode: str = 'HTML'):
-        """Send message to Telegram"""
         try:
             if not self.enabled or config.is_silent_mode():
                 self.logger.debug(f"Message not sent (silent mode or disabled): {text[:50]}...")
@@ -74,7 +69,6 @@ class AlphaTelegramBot:
             self.logger.error(f"Error sending message: {e}")
 
     async def send_pending_alerts(self):
-        """Send all pending alerts from database"""
         try:
             if not self.enabled or config.is_silent_mode():
                 return
@@ -106,29 +100,25 @@ class AlphaTelegramBot:
         except Exception as e:
             self.logger.error(f"Error sending pending alerts: {e}")
 
-    # ------------------------------------------------------------------
-    # Command handlers
-    # ------------------------------------------------------------------
-
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /start command"""
         await update.message.reply_text(
             "🚀 <b>Alpha-Engine2 Bot</b>\n\n"
             "مرحباً! أنا مساعدك الذكي لتحليل السوق السعودي.\n\n"
-            "<b>الأوامر المتاحة:</b>\n"
+            "<b>الأوامر:</b>\n"
+            "/analyze SYMBOL - تحليل فوري + مراقبة\n"
+            "/watchlist - مرشّحو اليوم\n"
+            "/watching - المراقبة النشطة\n"
+            "/unwatch SYMBOL - إيقاف مراقبة\n"
+            "/paper SYMBOL - صفقة ورقية\n"
+            "/paper_close SYMBOL - إغلاق ورقي\n"
+            "/papers - الصفقات الورقية\n"
             "/status - حالة النظام\n"
-            "/import_tasi_data - استيراد بيانات تاسي من CSV\n"
-            "/import_metastock - استيراد بيانات MetaStock (ZIP/DAT/MST أو URL)\n"
-            "/ms_symbols - عرض رموز ملف MetaStock\n"
-            "/silent_on - تفعيل الوضع الصامت\n"
-            "/silent_off - إيقاف الوضع الصامت\n"
             "/signals - آخر الإشارات\n"
             "/help - المساعدة",
             parse_mode='HTML'
         )
 
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /status command"""
         try:
             with db.get_session() as session:
                 result = session.execute(
@@ -137,447 +127,179 @@ class AlphaTelegramBot:
                 bots = result.fetchall()
 
             msg = "📊 <b>حالة النظام</b>\n\n"
-
             running = sum(1 for b in bots if b[1] == 'RUNNING')
             stopped = sum(1 for b in bots if b[1] == 'STOPPED')
             error   = sum(1 for b in bots if b[1] == 'ERROR')
-
             msg += f"✅ قيد التشغيل: {running}\n"
             msg += f"⏸ متوقف: {stopped}\n"
             msg += f"❌ خطأ: {error}\n\n"
             msg += f"🔇 الوضع الصامت: {'مفعّل' if config.is_silent_mode() else 'معطّل'}"
-
             await update.message.reply_text(msg, parse_mode='HTML')
-
         except Exception as e:
             await update.message.reply_text(f"❌ خطأ: {e}")
 
     async def cmd_import_tasi_data(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """
-        Handle /import_tasi_data command.
-
-        Triggers the DataImporter bot to read all CSV files from
-        data/historical/ and upsert them into market_data.ohlcv.
-        """
         await update.message.reply_text(
-            "⏳ <b>جارٍ استيراد البيانات...</b>\n\n"
-            "يتم الآن قراءة ملفات CSV من مجلد <code>data/historical/</code> "
-            "وإدخالها في قاعدة البيانات. قد يستغرق ذلك بعض الوقت.",
+            "⏳ <b>جارٍ استيراد البيانات...</b>",
             parse_mode='HTML'
         )
-
         try:
             importer = DataImporter()
             result = await importer.run()
-
             imported_rows = result.get('imported_rows', 0)
             file_count    = result.get('file_count', 0)
             errors        = result.get('errors', [])
             status        = result.get('status', 'unknown')
-
             if status == 'success' and not errors:
                 reply = (
                     f"✅ <b>تم الاستيراد بنجاح</b>\n\n"
-                    f"📁 الملفات المعالجة: <b>{file_count}</b>\n"
-                    f"📊 الصفوف المُدخلة: <b>{imported_rows:,}</b>\n\n"
-                    f"البيانات متوفرة الآن في جدول <code>market_data.ohlcv</code>"
+                    f"📁 الملفات: <b>{file_count}</b>\n"
+                    f"📊 الصفوف: <b>{imported_rows:,}</b>"
                 )
             elif status == 'partial':
                 error_summary = "\n".join(f"  • {e}" for e in errors[:5])
-                reply = (
-                    f"⚠️ <b>اكتمل الاستيراد مع أخطاء</b>\n\n"
-                    f"📁 الملفات المعالجة: <b>{file_count}</b>\n"
-                    f"📊 الصفوف المُدخلة: <b>{imported_rows:,}</b>\n"
-                    f"❌ أخطاء ({len(errors)}):\n{error_summary}"
-                )
+                reply = f"⚠️ اكتمل مع أخطاء\n{error_summary}"
             else:
-                reply = (
-                    f"ℹ️ <b>نتيجة الاستيراد</b>\n\n"
-                    f"{result.get('message', 'لا توجد ملفات للاستيراد.')}"
-                )
-
-            self.logger.info(
-                f"[/import_tasi_data] {imported_rows:,} rows from {file_count} files"
-            )
-
+                reply = result.get('message', 'لا توجد ملفات.')
         except Exception as exc:
-            self.logger.error(f"[/import_tasi_data] Unexpected error: {exc}")
-            reply = (
-                f"❌ <b>فشل الاستيراد</b>\n\n"
-                f"<code>{exc}</code>"
-            )
-
+            reply = f"❌ <code>{exc}</code>"
         await update.message.reply_text(reply, parse_mode='HTML')
 
-    # ── MetaStock Commands ─────────────────────────────────────────────────
-
     async def cmd_import_metastock(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """
-        Handle /import_metastock command.
-
-        يُطلب من المستخدم إرسال ملف ZIP يحتوي على بيانات MetaStock.
-        يمكن تمرير رموز محددة كمعاملات: /import_metastock 1010 1020 2222
-        """
-        # استخراج فلتر الرموز من المعاملات إن وُجدت
-        symbols_filter = None
-        if context.args:
-            symbols_filter = [s.upper() for s in context.args]
-            filter_text = f"\n📌 الرموز المحددة: <code>{', '.join(symbols_filter)}</code>"
-        else:
-            filter_text = "\n📌 سيتم استيراد <b>جميع الرموز</b>"
-
-        # حفظ الفلتر في بيانات المستخدم للاستخدام عند استقبال الملف
+        symbols_filter = [s.upper() for s in context.args] if context.args else None
         context.user_data['ms_symbols_filter'] = symbols_filter
-
+        filter_text = (
+            f"\n📌 الرموز: <code>{', '.join(symbols_filter)}</code>"
+            if symbols_filter else "\n📌 جميع الرموز"
+        )
         await update.message.reply_text(
-            "📂 <b>استيراد بيانات MetaStock</b>\n\n"
-            "أرسل ملف <b>ZIP/DAT/MST</b> أو رابط URL يحتوي على بيانات MetaStock "
-            "(EMASTER/XMASTER + ملفات F*.DAT).\n"
-            f"{filter_text}\n\n"
-            "💡 <i>يمكنك تحديد رموز معينة بكتابتها بعد الأمر:\n"
-            "<code>/import_metastock 1010 1020 2222</code></i>",
+            "📂 <b>استيراد MetaStock</b>\nأرسل ZIP/DAT/MST أو URL" + filter_text,
             parse_mode='HTML'
         )
 
     async def cmd_ms_symbols(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """
-        Handle /ms_symbols command.
-
-        يُطلب من المستخدم إرسال ملف ZIP لعرض قائمة الرموز فيه دون استيراد.
-        """
         context.user_data['ms_list_only'] = True
-        await update.message.reply_text(
-            "🔍 <b>عرض رموز MetaStock</b>\n\n"
-            "أرسل ملف <b>ZIP/DAT/MST</b> أو رابط URL يحتوي على بيانات MetaStock "
-            "لعرض قائمة الرموز المتاحة.",
-            parse_mode='HTML'
-        )
+        await update.message.reply_text("🔍 أرسل ملف MetaStock لعرض الرموز.", parse_mode='HTML')
 
     async def cmd_silent_on(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Enable silent mode"""
         config.enable_silent_mode()
-        await update.message.reply_text(
-            "🔇 <b>تم تفعيل الوضع الصامت</b>\n\n"
-            "لن يتم إرسال التنبيهات، لكن جمع البيانات مستمر.",
-            parse_mode='HTML'
-        )
+        await update.message.reply_text("🔇 تم تفعيل الوضع الصامت", parse_mode='HTML')
 
     async def cmd_silent_off(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Disable silent mode"""
         config.disable_silent_mode()
-        await update.message.reply_text(
-            "🔔 <b>تم إيقاف الوضع الصامت</b>\n\n"
-            "سيتم إرسال التنبيهات بشكل طبيعي.",
-            parse_mode='HTML'
-        )
+        await update.message.reply_text("🔔 تم إيقاف الوضع الصامت", parse_mode='HTML')
 
     async def cmd_signals(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show recent signals"""
         try:
             with db.get_session() as session:
                 result = session.execute(text("""
                     SELECT strategy_name, symbol, signal_type, confidence, price, timestamp
                     FROM strategies.signals
-                    ORDER BY timestamp DESC
-                    LIMIT 10
+                    ORDER BY timestamp DESC LIMIT 10
                 """))
                 signals = result.fetchall()
-
             if not signals:
                 await update.message.reply_text("لا توجد إشارات حديثة")
                 return
-
             text = "🎯 <b>آخر الإشارات</b>\n\n"
-
             for strategy, symbol, signal_type, confidence, price, timestamp in signals:
                 emoji = "🟢" if signal_type == 'BUY' else "🔴" if signal_type == 'SELL' else "⚪"
                 text += f"{emoji} <b>{symbol}</b> - {signal_type}\n"
-                text += f"   الاستراتيجية: {strategy}\n"
-                text += f"   الثقة: {confidence:.0%} | السعر: {price:.2f}\n"
-                text += f"   {timestamp.strftime('%H:%M:%S')}\n\n"
-
+                text += f"   {strategy} | {confidence:.0%} | {price:.2f}\n\n"
             await update.message.reply_text(text, parse_mode='HTML')
-
         except Exception as e:
             await update.message.reply_text(f"❌ خطأ: {e}")
 
     async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show help"""
         text = (
-            "📚 <b>المساعدة - Alpha-Engine2</b>\n\n"
-            "<b>الأوامر المتاحة:</b>\n\n"
-            "/start - بدء البوت\n"
-            "/status - عرض حالة النظام والروبوتات\n"
-            "/import_tasi_data - استيراد بيانات تاسي من ملفات CSV\n"
-            "/import_metastock - استيراد بيانات MetaStock من ملف ZIP\n"
-            "/ms_symbols - عرض قائمة الرموز في ملف MetaStock\n"
-            "/silent_on - تفعيل الوضع الصامت (إيقاف التنبيهات)\n"
-            "/silent_off - إيقاف الوضع الصامت (تفعيل التنبيهات)\n"
-            "/signals - عرض آخر 10 إشارات\n"
-            "/help - عرض هذه المساعدة\n\n"
-            "<b>استيراد MetaStock:</b>\n"
-            "1. اكتب <code>/import_metastock</code>\n"
-            "2. أرسل ملف ZIP يحتوي على بيانات MetaStock\n"
-            "3. انتظر رسالة التأكيد\n\n"
-            "يمكن تحديد رموز معينة:\n"
-            "<code>/import_metastock 1010 1020 2222</code>\n\n"
-            "<b>استيراد CSV:</b> ضع ملفات CSV في مجلد "
-            "<code>data/historical/</code> باسم "
-            "<code>SYMBOL_TIMEFRAME.csv</code>."
+            "📚 <b>المساعدة</b>\n\n"
+            "/analyze SYMBOL — تحليل + مراقبة نشطة\n"
+            "/watchlist — مرشّحو اليوم\n"
+            "/watching — قائمة المراقبة\n"
+            "/unwatch SYMBOL — إيقاف مراقبة\n"
+            "/paper SYMBOL — فتح صفقة ورقية\n"
+            "/paper_close SYMBOL — إغلاق ورقي\n"
+            "/papers — الصفقات المفتوحة\n"
+            "/status /signals /silent_on /silent_off\n"
+            "/import_tasi_data /import_metastock /ms_symbols"
         )
         await update.message.reply_text(text, parse_mode='HTML')
 
-    # ── معالج المستندات وروابط MetaStock ─────────────────────────────────
-
     async def handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """
-        معالج الملفات المرسلة عبر التليجرام.
-
-        يقبل:
-          - ملفات ZIP تحتوي على بيانات MetaStock
-          - يتحقق من الحجم والامتداد قبل التنزيل
-        """
         doc: Document = update.message.document
         if doc is None:
             return
-
         filename = doc.file_name or 'unknown'
         file_size_mb = (doc.file_size or 0) / (1024 * 1024)
-
-        self.logger.info(
-            f"[document] استقبال ملف: {filename} "
-            f"({file_size_mb:.1f} MB) من المستخدم {update.effective_user.id}"
-        )
-
-        # ── التحقق من الامتداد ──────────────────────────────────────────
         ext = Path(filename).suffix.lower()
         if ext not in ('.zip', '.dat', '.mst', '.mwd'):
-            await update.message.reply_text(
-                "⚠️ <b>نوع الملف غير مدعوم</b>\n\n"
-                "تُقبل ملفات <b>ZIP/DAT/MST/MWD</b> أو روابط URL لبيانات MetaStock.\n"
-                "استخدم الأمر <code>/import_metastock</code> للمزيد من التفاصيل.",
-                parse_mode='HTML'
-            )
+            await update.message.reply_text("⚠️ نوع الملف غير مدعوم", parse_mode='HTML')
             return
-
-        # ── التحقق من الحجم ─────────────────────────────────────────────
         if file_size_mb > self.MAX_FILE_SIZE_MB:
-            await update.message.reply_text(
-                f"⚠️ <b>الملف كبير جداً</b>\n\n"
-                f"الحد الأقصى المسموح: <b>{self.MAX_FILE_SIZE_MB} MB</b>\n"
-                f"حجم ملفك: <b>{file_size_mb:.1f} MB</b>",
-                parse_mode='HTML'
-            )
+            await update.message.reply_text(f"⚠️ الملف كبير جداً ({file_size_mb:.1f} MB)", parse_mode='HTML')
             return
-
-        # ── استرداد إعدادات الجلسة ──────────────────────────────────────
         list_only: bool = context.user_data.pop('ms_list_only', False)
         symbols_filter = context.user_data.pop('ms_symbols_filter', None)
-
-        # ── إشعار البدء ─────────────────────────────────────────────────
-        progress_msg = await update.message.reply_text(
-            f"⏬ <b>جارٍ تنزيل الملف...</b>\n"
-            f"📄 {filename} ({file_size_mb:.1f} MB)",
-            parse_mode='HTML'
-        )
-
-        # ── تنزيل الملف ─────────────────────────────────────────────────
+        progress_msg = await update.message.reply_text(f"⏬ تنزيل {filename}...", parse_mode='HTML')
         with tempfile.TemporaryDirectory(prefix='tg_ms_') as tmp_dir:
             zip_path = Path(tmp_dir) / filename
             try:
                 tg_file = await doc.get_file()
                 await tg_file.download_to_drive(str(zip_path))
-                self.logger.info(f"[document] تم تنزيل: {zip_path}")
             except Exception as e:
-                self.logger.error(f"[document] فشل التنزيل: {e}")
-                await progress_msg.edit_text(
-                    f"❌ <b>فشل تنزيل الملف</b>\n\n<code>{e}</code>",
-                    parse_mode='HTML'
-                )
+                await progress_msg.edit_text(f"❌ فشل التنزيل: {e}", parse_mode='HTML')
                 return
-
-            # ── وضع العرض فقط (ms_symbols) ──────────────────────────────
             if list_only:
                 await self._handle_ms_list(update, progress_msg, zip_path, tmp_dir)
                 return
+            await self._handle_ms_import(update, progress_msg, zip_path, tmp_dir, symbols_filter)
 
-            # ── وضع الاستيراد الكامل ─────────────────────────────────────
-            await self._handle_ms_import(
-                update, progress_msg, zip_path, tmp_dir, symbols_filter
-            )
-
-    async def _handle_ms_list(
-        self,
-        update: Update,
-        progress_msg,
-        zip_path: Path,
-        tmp_dir: str,
-    ):
-        """عرض قائمة الرموز في ملف MetaStock دون استيراد."""
+    async def _handle_ms_list(self, update, progress_msg, zip_path, tmp_dir):
         try:
-            await progress_msg.edit_text(
-                "🔍 <b>جارٍ قراءة فهرس MetaStock...</b>",
-                parse_mode='HTML'
-            )
             data_dir, _ = self._prepare_metastock_path(zip_path, tmp_dir)
             parser = MetaStockParser(data_dir)
             symbols = parser.list_symbols()
-
             if not symbols:
-                await progress_msg.edit_text(
-                    "⚠️ <b>لم يُعثر على رموز في الملف</b>\n\n"
-                    "تأكد أن الملف يحتوي على EMASTER أو XMASTER.",
-                    parse_mode='HTML'
-                )
+                await progress_msg.edit_text("⚠️ لم يُعثر على رموز", parse_mode='HTML')
                 return
-
-            # بناء الرسالة (حد 4096 حرف في تيليجرام)
-            lines = [f"📋 <b>رموز MetaStock ({len(symbols)} رمز)</b>\n"]
-            for s in symbols[:50]:  # عرض أول 50 رمز
-                tf = s.get('timeframe', '?')
-                name = s.get('name', '')[:20]
-                fd = s.get('first_date', '?')
-                ld = s.get('last_date', '?')
-                lines.append(
-                    f"• <code>{s['symbol']:<10}</code> {name:<20} "
-                    f"[{tf}] {fd} → {ld}"
-                )
-
-            if len(symbols) > 50:
-                lines.append(f"\n<i>... و {len(symbols) - 50} رمز آخر</i>")
-
-            lines.append(
-                f"\n💡 لاستيراد جميع الرموز: <code>/import_metastock</code>\n"
-                f"لاستيراد رموز محددة: <code>/import_metastock 1010 2222</code>"
-            )
-
-            await progress_msg.edit_text(
-                '\n'.join(lines),
-                parse_mode='HTML'
-            )
-
+            lines = [f"📋 رموز MetaStock ({len(symbols)})\n"]
+            for s in symbols[:50]:
+                lines.append(f"• <code>{s['symbol']}</code>")
+            await progress_msg.edit_text('\n'.join(lines), parse_mode='HTML')
         except Exception as e:
-            self.logger.error(f"[ms_list] خطأ: {e}")
-            await progress_msg.edit_text(
-                f"❌ <b>خطأ في قراءة الملف</b>\n\n<code>{e}</code>",
-                parse_mode='HTML'
-            )
+            await progress_msg.edit_text(f"❌ {e}", parse_mode='HTML')
 
-    async def _handle_ms_import(
-        self,
-        update: Update,
-        progress_msg,
-        zip_path: Path,
-        tmp_dir: str,
-        symbols_filter,
-    ):
-        """استيراد بيانات MetaStock من ملف ZIP إلى قاعدة البيانات."""
+    async def _handle_ms_import(self, update, progress_msg, zip_path, tmp_dir, symbols_filter):
         try:
-            filter_text = (
-                f"الرموز: {', '.join(symbols_filter)}"
-                if symbols_filter
-                else "جميع الرموز"
-            )
-            await progress_msg.edit_text(
-                f"⚙️ <b>جارٍ الاستيراد...</b>\n\n"
-                f"📌 {filter_text}\n"
-                f"⏳ قد يستغرق هذا بعض الوقت...",
-                parse_mode='HTML'
-            )
-
+            await progress_msg.edit_text("⚙️ جارٍ الاستيراد...", parse_mode='HTML')
             importer = MetaStockImporter()
             if zip_path.suffix.lower() == '.zip':
                 result = await importer.import_from_zip(zip_path, symbols_filter)
             else:
                 data_dir, _ = self._prepare_metastock_path(zip_path, tmp_dir)
                 result = await importer.import_from_dir(data_dir, symbols_filter)
-
             await self._send_import_result(progress_msg, result)
-            self.logger.success(
-                f"[ms_import] اكتمل: "
-                f"{result.get('imported_rows', 0):,} صف، "
-                f"{result.get('symbols_count', 0)} رمز"
-            )
-
         except Exception as e:
-            self.logger.error(f"[ms_import] خطأ: {e}")
-            await progress_msg.edit_text(
-                f"❌ <b>فشل الاستيراد</b>\n\n<code>{e}</code>",
-                parse_mode='HTML'
-            )
+            await progress_msg.edit_text(f"❌ {e}", parse_mode='HTML')
 
     async def _send_import_result(self, progress_msg, result: dict):
-        """تنسيق وإرسال نتيجة الاستيراد."""
-        status        = result.get('status', 'unknown')
-        symbols_count = result.get('symbols_count', 0)
-        imported_rows = result.get('imported_rows', 0)
-        errors        = result.get('errors', [])
-        symbols       = result.get('symbols', [])
-
-        if status == 'success':
-            icon = "✅"
-            title = "تم الاستيراد بنجاح"
-        elif status == 'partial':
-            icon = "⚠️"
-            title = "اكتمل الاستيراد مع بعض الأخطاء"
-        elif status == 'empty':
-            icon = "ℹ️"
-            title = "لم يُعثر على بيانات"
-        else:
-            icon = "❌"
-            title = "فشل الاستيراد"
-
+        status = result.get('status', 'unknown')
         lines = [
-            f"{icon} <b>{title}</b>\n",
-            f"📊 الرموز المستوردة: <b>{symbols_count}</b>",
-            f"📈 إجمالي الشموع: <b>{imported_rows:,}</b>",
+            f"{'✅' if status=='success' else '⚠️'} <b>{status}</b>",
+            f"رموز: {result.get('symbols_count', 0)} · صفوف: {result.get('imported_rows', 0):,}",
         ]
-
-        # تفاصيل الرموز (أول 10)
-        if symbols:
-            lines.append("\n<b>تفاصيل الرموز:</b>")
-            for s in symbols[:10]:
-                lines.append(
-                    f"  • <code>{s['symbol']}</code> — "
-                    f"{s['rows']:,} شمعة [{s['timeframe']}]"
-                )
-            if len(symbols) > 10:
-                lines.append(f"  <i>... و {len(symbols) - 10} رمز آخر</i>")
-
-        # الأخطاء
-        if errors:
-            lines.append(f"\n❌ <b>أخطاء ({len(errors)}):</b>")
-            for err in errors[:5]:
-                lines.append(f"  • {err}")
-            if len(errors) > 5:
-                lines.append(f"  <i>... و {len(errors) - 5} خطأ آخر</i>")
-
-        lines.append(
-            f"\n<i>البيانات متوفرة في جدول "
-            f"<code>market_data.ohlcv</code></i>"
-        )
-
-        await progress_msg.edit_text(
-            '\n'.join(lines),
-            parse_mode='HTML'
-        )
-
+        await progress_msg.edit_text('\n'.join(lines), parse_mode='HTML')
 
     async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle MetaStock URL messages after /import_metastock or /ms_symbols."""
         text_value = (update.message.text or "").strip()
         parsed = urlparse(text_value)
         if parsed.scheme not in {"http", "https"}:
             return
         if not (context.user_data.get('ms_symbols_filter') is not None or context.user_data.get('ms_list_only')):
-            await update.message.reply_text(
-                "ℹ️ أرسل الأمر <code>/import_metastock</code> أولاً ثم أرسل رابط ملف MetaStock.",
-                parse_mode='HTML',
-            )
             return
         list_only: bool = context.user_data.pop('ms_list_only', False)
         symbols_filter = context.user_data.pop('ms_symbols_filter', None)
-        progress_msg = await update.message.reply_text("⏬ <b>جارٍ تنزيل رابط MetaStock...</b>", parse_mode='HTML')
+        progress_msg = await update.message.reply_text("⏬ تنزيل الرابط...", parse_mode='HTML')
         with tempfile.TemporaryDirectory(prefix='tg_ms_url_') as tmp_dir:
             filename = Path(parsed.path).name or 'metastock.zip'
             target = Path(tmp_dir) / filename
@@ -585,30 +307,18 @@ class AlphaTelegramBot:
                 async with httpx.AsyncClient(follow_redirects=True, timeout=120) as client:
                     async with client.stream('GET', text_value) as response:
                         response.raise_for_status()
-                        total = int(response.headers.get('content-length', '0') or 0)
-                        if total > self.MAX_FILE_SIZE_MB * 1024 * 1024:
-                            raise ValueError(f"الملف أكبر من الحد المسموح {self.MAX_FILE_SIZE_MB} MB")
-                        written = 0
                         with open(target, 'wb') as fh:
                             async for chunk in response.aiter_bytes():
-                                written += len(chunk)
-                                if written > self.MAX_FILE_SIZE_MB * 1024 * 1024:
-                                    raise ValueError(f"الملف أكبر من الحد المسموح {self.MAX_FILE_SIZE_MB} MB")
                                 fh.write(chunk)
-                await progress_msg.edit_text("✅ تم تنزيل الرابط. جارٍ المعالجة...", parse_mode='HTML')
             except Exception as exc:
-                await progress_msg.edit_text(
-                    f"❌ <b>فشل تنزيل الرابط</b>\n\n<code>{exc}</code>",
-                    parse_mode='HTML'
-                )
+                await progress_msg.edit_text(f"❌ {exc}", parse_mode='HTML')
                 return
             if list_only:
                 await self._handle_ms_list(update, progress_msg, target, tmp_dir)
             else:
                 await self._handle_ms_import(update, progress_msg, target, tmp_dir, symbols_filter)
 
-    def _prepare_metastock_path(self, source_path: Path, tmp_dir: str) -> tuple[Path, bool]:
-        """Return directory path and whether it was already extracted/prepared."""
+    def _prepare_metastock_path(self, source_path: Path, tmp_dir: str):
         ext = source_path.suffix.lower()
         if ext == '.zip':
             return extract_metastock_zip(source_path, Path(tmp_dir) / 'extracted'), True
@@ -619,67 +329,50 @@ class AlphaTelegramBot:
             if source_path.resolve() != target.resolve():
                 target.write_bytes(source_path.read_bytes())
             return single_dir, True
-        raise ValueError(f"صيغة MetaStock غير مدعومة: {ext}")
-
-    # ------------------------------------------------------------------
-    # Setup & run
-    # ------------------------------------------------------------------
+        raise ValueError(f"صيغة غير مدعومة: {ext}")
 
     def setup_handlers(self):
-        """Setup command handlers"""
-        self.application.add_handler(CommandHandler("start",             self.cmd_start))
-        self.application.add_handler(CommandHandler("status",            self.cmd_status))
-        self.application.add_handler(CommandHandler("import_tasi_data",  self.cmd_import_tasi_data))
-        self.application.add_handler(CommandHandler("import_metastock",  self.cmd_import_metastock))
-        self.application.add_handler(CommandHandler("upload_ms",         self.cmd_import_metastock))
-        self.application.add_handler(CommandHandler("ms_symbols",        self.cmd_ms_symbols))
-        self.application.add_handler(CommandHandler("silent_on",         self.cmd_silent_on))
-        self.application.add_handler(CommandHandler("silent_off",        self.cmd_silent_off))
-        self.application.add_handler(CommandHandler("signals",           self.cmd_signals))
-        self.application.add_handler(CommandHandler("help",              self.cmd_help))
+        self.application.add_handler(CommandHandler("start", self.cmd_start))
+        self.application.add_handler(CommandHandler("status", self.cmd_status))
+        self.application.add_handler(CommandHandler("import_tasi_data", self.cmd_import_tasi_data))
+        self.application.add_handler(CommandHandler("import_metastock", self.cmd_import_metastock))
+        self.application.add_handler(CommandHandler("upload_ms", self.cmd_import_metastock))
+        self.application.add_handler(CommandHandler("ms_symbols", self.cmd_ms_symbols))
+        self.application.add_handler(CommandHandler("silent_on", self.cmd_silent_on))
+        self.application.add_handler(CommandHandler("silent_off", self.cmd_silent_off))
+        self.application.add_handler(CommandHandler("signals", self.cmd_signals))
+        self.application.add_handler(CommandHandler("help", self.cmd_help))
 
-        # معالج الملفات المرسلة (ZIP)
-        self.application.add_handler(
-            MessageHandler(filters.Document.ALL, self.handle_document)
-        )
-        self.application.add_handler(
-            MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text)
-        )
+        # Phase 5 commands
+        from scripts.telegram_phase5 import register_phase5_handlers
+        register_phase5_handlers(self.application)
+
+        self.application.add_handler(MessageHandler(filters.Document.ALL, self.handle_document))
+        self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text))
 
     async def run(self):
-        """Run the bot"""
         if not self.enabled:
             self.logger.warning("Telegram bot is disabled")
             return
-
         try:
             self.logger.info("Starting Telegram bot")
-
             self.application = Application.builder().token(self.token).build()
             self.setup_handlers()
-
             await self.application.initialize()
             await self.application.start()
             await self.application.updater.start_polling()
-
             self.logger.success("Telegram bot is running")
-
             while True:
                 await asyncio.sleep(1)
-
         except Exception as e:
             self.logger.error(f"Error running Telegram bot: {e}")
 
 
-# ---------------------------------------------------------------------------
-# Celery task for sending pending alerts
-# ---------------------------------------------------------------------------
 from celery import shared_task
 
 
 @shared_task(name='scripts.telegram_bot.send_pending_alerts')
 def send_pending_alerts():
-    """Celery task to send pending alerts"""
     try:
         bot = AlphaTelegramBot()
         asyncio.run(bot.send_pending_alerts())
