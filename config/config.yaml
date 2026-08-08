@@ -184,6 +184,14 @@ bots:
     enabled: true
     model_name: ProsusAI/finbert
     max_articles: 8
+  watchlist_generator:
+    enabled: true
+    top_n: 15
+    min_score: 25
+    w_genetic: 0.35
+    w_phase: 0.25
+    w_features: 0.25
+    w_sentiment: 0.15
   health_monitor:
     enabled: false
     run_interval: 3600
