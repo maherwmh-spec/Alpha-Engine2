@@ -192,6 +192,9 @@ bots:
     w_phase: 0.25
     w_features: 0.25
     w_sentiment: 0.15
+  analyze:
+    enabled: true
+    alert_cooldown_minutes: 30
   health_monitor:
     enabled: false
     run_interval: 3600
