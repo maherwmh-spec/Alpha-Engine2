@@ -9,6 +9,7 @@ Phase 1: Unified genetic-engine-run at 18:00 (DEAP schedule removed).
 Phase 2: stock_personality at 17:30.
 Phase 3: feature_engineer 16:45, sentiment_analyzer 17:00.
 Phase 4: watchlist_generator at 07:30 (morning Telegram list).
+Phase 7: weekly_reviewer Sunday 18:00 (review + self_trainer v1 + report).
 """
 
 import os
@@ -155,9 +156,11 @@ app.conf.beat_schedule = {
         'schedule': crontab(hour=8, minute=0),
         'options': {'queue': 'normal'},
     },
+
+    # Phase 7: weekly review Sunday 18:00 Asia/Riyadh (includes self_trainer v1)
     'weekly-reviewer-run': {
         'task': 'bots.weekly_reviewer.tasks.run_weekly_reviewer',
-        'schedule': crontab(day_of_week=0, hour=9, minute=0),
+        'schedule': crontab(day_of_week=0, hour=18, minute=0),
         'options': {'queue': 'normal'},
     },
 
@@ -194,9 +197,11 @@ app.conf.beat_schedule = {
         'options': {'queue': 'normal'},
     },
 
+    # self_trainer standalone kept off schedule when disabled;
+    # primary path is inside weekly_reviewer at Sunday 18:00
     'self-trainer-run': {
         'task': 'bots.self_trainer.tasks.run_self_trainer',
-        'schedule': crontab(hour=2, minute=0),
+        'schedule': crontab(day_of_week=0, hour=18, minute=15),
         'options': {'queue': 'low_priority'},
     },
     'freqai-manager-run': {
