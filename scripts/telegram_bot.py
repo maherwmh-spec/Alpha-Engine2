@@ -3,6 +3,7 @@ Alpha-Engine2 Telegram Bot
 Sends alerts and handles commands.
 
 Phase 5: /analyze /watchlist /watching /unwatch /paper /paper_close /papers
+Phase 6: /strategy /update_strategy /strategies /params
 """
 
 import asyncio
@@ -106,14 +107,12 @@ class AlphaTelegramBot:
             "مرحباً! أنا مساعدك الذكي لتحليل السوق السعودي.\n\n"
             "<b>الأوامر:</b>\n"
             "/analyze SYMBOL - تحليل فوري + مراقبة\n"
+            "/strategy SYMBOL - عرض المعاملات\n"
+            "/update_strategy SYMBOL k=v - تعديل بدون كود\n"
+            "/params - المفاتيح المسموحة\n"
             "/watchlist - مرشّحو اليوم\n"
-            "/watching - المراقبة النشطة\n"
-            "/unwatch SYMBOL - إيقاف مراقبة\n"
             "/paper SYMBOL - صفقة ورقية\n"
-            "/paper_close SYMBOL - إغلاق ورقي\n"
-            "/papers - الصفقات الورقية\n"
             "/status - حالة النظام\n"
-            "/signals - آخر الإشارات\n"
             "/help - المساعدة",
             parse_mode='HTML'
         )
@@ -214,14 +213,14 @@ class AlphaTelegramBot:
         text = (
             "📚 <b>المساعدة</b>\n\n"
             "/analyze SYMBOL — تحليل + مراقبة نشطة\n"
+            "/strategy SYMBOL — المعاملات الفعّالة\n"
+            "/update_strategy SYMBOL k=v — تعديل بدون كود\n"
+            "/params — المفاتيح والحدود\n"
+            "/strategies — رموز لديها overrides\n"
             "/watchlist — مرشّحو اليوم\n"
             "/watching — قائمة المراقبة\n"
-            "/unwatch SYMBOL — إيقاف مراقبة\n"
             "/paper SYMBOL — فتح صفقة ورقية\n"
-            "/paper_close SYMBOL — إغلاق ورقي\n"
-            "/papers — الصفقات المفتوحة\n"
-            "/status /signals /silent_on /silent_off\n"
-            "/import_tasi_data /import_metastock /ms_symbols"
+            "/status /signals /silent_on /silent_off"
         )
         await update.message.reply_text(text, parse_mode='HTML')
 
@@ -343,9 +342,11 @@ class AlphaTelegramBot:
         self.application.add_handler(CommandHandler("signals", self.cmd_signals))
         self.application.add_handler(CommandHandler("help", self.cmd_help))
 
-        # Phase 5 commands
         from scripts.telegram_phase5 import register_phase5_handlers
         register_phase5_handlers(self.application)
+
+        from scripts.telegram_phase6 import register_phase6_handlers
+        register_phase6_handlers(self.application)
 
         self.application.add_handler(MessageHandler(filters.Document.ALL, self.handle_document))
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text))
