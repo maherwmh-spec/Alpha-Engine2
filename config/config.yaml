@@ -197,15 +197,19 @@ bots:
     alert_cooldown_minutes: 30
   parameter_editor:
     enabled: true
+  weekly_reviewer:
+    enabled: true
+    min_trades_for_symbol: 3
+    weak_win_rate: 0.40
+  self_trainer:
+    enabled: true
+    auto_apply: false
+    bump_min_confidence: 0.05
+    max_symbols_adjust: 5
   health_monitor:
     enabled: false
     run_interval: 3600
   backup_manager:
-    enabled: false
-  self_trainer:
-    enabled: false
-    run_interval: 86400
-  weekly_reviewer:
     enabled: false
   freqai_manager:
     enabled: false
