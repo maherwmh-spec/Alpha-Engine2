@@ -1,10 +1,20 @@
-"""Stub tasks for weekly_reviewer - not yet implemented"""
+"""Celery tasks for weekly_reviewer (Phase 7)."""
 from scripts.celery_app import app
 from loguru import logger
 
 
-@app.task(name='bots.weekly_reviewer.tasks.run_weekly_reviewer', bind=True)
-def run_weekly_reviewer(self):
-    """Stub task for weekly_reviewer"""
-    logger.info("weekly_reviewer task stub - not yet implemented")
-    return {"status": "stub", "bot": "weekly_reviewer"}
+@app.task(name="bots.weekly_reviewer.tasks.run_weekly_reviewer", bind=True, max_retries=2)
+def run_weekly_reviewer(self, send_telegram: bool = True, force: bool = False):
+    """Run weekly review + self_trainer v1 + optional Telegram report."""
+    try:
+        from bots.weekly_reviewer.bot import WeeklyReviewerBot
+
+        result = WeeklyReviewerBot().run(send_telegram=send_telegram, force=force)
+        logger.success(
+            f"weekly_reviewer done: week={result.get('week_id')} "
+            f"status={result.get('status')} notified={result.get('notified')}"
+        )
+        return result
+    except Exception as exc:
+        logger.error(f"run_weekly_reviewer failed: {exc}")
+        raise self.retry(exc=exc, countdown=300)
