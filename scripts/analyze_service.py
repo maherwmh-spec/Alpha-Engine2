@@ -1,6 +1,7 @@
 """
 Phase 5 — AnalyzeService
 Unified snapshot for /analyze, watchlist display, paper trades helpers.
+Phase 6 — uses ParameterEditor effective params for SL/TP and report line.
 """
 from __future__ import annotations
 
@@ -29,10 +30,25 @@ class AnalyzeService:
         self.default_sl_pct = abs(float(sl[0])) if isinstance(sl, list) and sl else 0.02
         self.default_tp_pct = float(tp[0]) if isinstance(tp, list) and tp else 0.04
 
+    def _effective_risk(self, symbol: str) -> Tuple[float, float, Dict[str, Any]]:
+        """Return (sl_pct, tp_pct, effective_dict) with Phase 6 overrides when available."""
+        try:
+            from scripts.parameter_editor import ParameterEditor
+
+            eff = ParameterEditor().effective_params(symbol)
+            sl = float(eff.get("stop_loss_pct", self.default_sl_pct))
+            tp = float(eff.get("take_profit_pct", self.default_tp_pct))
+            return sl, tp, eff
+        except Exception as exc:
+            self.logger.debug(f"effective params fallback: {exc}")
+            return self.default_sl_pct, self.default_tp_pct, {}
+
     # ── Public API ───────────────────────────────────────────────────────────
     def analyze(self, symbol: str, add_watch: bool = True) -> Dict[str, Any]:
         symbol = str(symbol).strip().upper()
         data = self._collect(symbol)
+        _, _, eff = self._effective_risk(symbol)
+        data["effective_params"] = eff
         html = self._format_html(symbol, data)
         if add_watch:
             self.upsert_monitoring(
@@ -151,7 +167,8 @@ class AnalyzeService:
         if price is None or price <= 0:
             return {"ok": False, "error": "لا يوجد سعر متاح لفتح صفقة ورقية"}
 
-        # close existing open paper on same symbol
+        sl_pct, tp_pct, eff = self._effective_risk(symbol)
+
         with db.get_session() as session:
             session.execute(
                 text(
@@ -163,8 +180,8 @@ class AnalyzeService:
                 ),
                 {"symbol": symbol},
             )
-            sl = price * (1 - self.default_sl_pct)
-            tp = price * (1 + self.default_tp_pct)
+            sl = price * (1 - sl_pct)
+            tp = price * (1 + tp_pct)
             row = session.execute(
                 text(
                     """
@@ -196,6 +213,9 @@ class AnalyzeService:
             "entry": price,
             "stop_loss": sl,
             "take_profit": tp,
+            "sl_pct": sl_pct,
+            "tp_pct": tp_pct,
+            "objective": eff.get("objective"),
         }
 
     def close_paper(self, symbol: str) -> Dict[str, Any]:
@@ -256,11 +276,9 @@ class AnalyzeService:
         ]
 
     def check_active_and_papers(self) -> Dict[str, Any]:
-        """Called by monitor: phase/sentiment changes + paper SL/TP."""
         alerts: List[str] = []
         from scripts.database import insert_alert
 
-        # Active monitoring changes
         watching = self.list_watching()
         for w in watching:
             symbol = w["symbol"]
@@ -310,7 +328,6 @@ class AnalyzeService:
                 except Exception as exc:
                     self.logger.error(f"alert upsert failed {symbol}: {exc}")
             else:
-                # silent state refresh
                 try:
                     with db.get_session() as session:
                         session.execute(
@@ -335,7 +352,6 @@ class AnalyzeService:
                 except Exception:
                     pass
 
-        # Paper SL/TP
         papers = self.list_open_papers()
         for p in papers:
             symbol = p["symbol"]
@@ -371,8 +387,15 @@ class AnalyzeService:
 
         return {"alerts": alerts, "watching": len(watching), "papers": len(papers)}
 
-    # ── Internals ────────────────────────────────────────────────────────────
     def _can_alert(self, symbol: str) -> bool:
+        cooldown = self.cooldown_min
+        try:
+            from scripts.parameter_editor import ParameterEditor
+
+            eff = ParameterEditor().effective_params(symbol)
+            cooldown = int(eff.get("alert_cooldown_minutes", cooldown))
+        except Exception:
+            pass
         try:
             with db.get_session() as session:
                 row = session.execute(
@@ -390,7 +413,7 @@ class AnalyzeService:
             if last.tzinfo is None:
                 last = last.replace(tzinfo=timezone.utc)
             age = (_utcnow() - last).total_seconds() / 60.0
-            return age >= self.cooldown_min
+            return age >= cooldown
         except Exception:
             return True
 
@@ -498,20 +521,16 @@ class AnalyzeService:
 
     def _last_price(self, symbol: str) -> Optional[float]:
         queries = [
-            (
-                """
+            """
                 SELECT close FROM market_data.ohlcv
                 WHERE symbol = :s AND timeframe = '1d'
                 ORDER BY time DESC LIMIT 1
-                """
-            ),
-            (
-                """
+                """,
+            """
                 SELECT close FROM market_data.ohlcv
                 WHERE symbol = :s
                 ORDER BY time DESC LIMIT 1
-                """
-            ),
+                """,
         ]
         for q in queries:
             try:
@@ -571,7 +590,20 @@ class AnalyzeService:
             lines.append("Watchlist اليوم: غير مدرج")
         gf = d.get("genetic_fitness")
         lines.append(f"جيني: fitness {self._fmt(gf, digits=3)}" if gf is not None else "جيني: —")
+
+        eff = d.get("effective_params") or {}
+        if eff:
+            lines.append(
+                f"إعدادات: SL {self._fmt(eff.get('stop_loss_pct'), pct=True)} · "
+                f"TP {self._fmt(eff.get('take_profit_pct'), pct=True)} · "
+                f"{eff.get('objective') or '—'}"
+            )
+
         lines.append("\n<i>ليس أمراً تنفيذياً — للمراقبة والورقي فقط.</i>")
         lines.append("أُضيف إلى المراقبة النشطة ✅")
-        lines.append("\n<code>/paper {0}</code> · <code>/unwatch {0}</code>".format(symbol))
+        lines.append(
+            "\n<code>/paper {0}</code> · <code>/strategy {0}</code> · <code>/unwatch {0}</code>".format(
+                symbol
+            )
+        )
         return "\n".join(lines)
