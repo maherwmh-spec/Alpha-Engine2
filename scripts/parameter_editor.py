@@ -21,7 +21,6 @@ ALLOWED_OBJECTIVES = {
     "momentum",
 }
 
-# key -> (type, min, max)  type: float | bool | str | int
 PARAM_SPEC: Dict[str, Dict[str, Any]] = {
     "stop_loss_pct": {"type": "float", "min": 0.005, "max": 0.15},
     "take_profit_pct": {"type": "float", "min": 0.005, "max": 0.30},
@@ -40,7 +39,7 @@ class ParameterEditor:
         self.logger = logger.bind(service="parameter_editor")
 
     def allowed_params(self) -> Dict[str, Any]:
-        return {k: {kk: vv for kk, vv in v.items() if kk != "choices" or True} for k, v in PARAM_SPEC.items()}
+        return dict(PARAM_SPEC)
 
     def defaults(self, symbol: Optional[str] = None) -> Dict[str, Any]:
         sl = config.get("profit_objectives.short_swings.stoploss_range", [-0.015, -0.03])
@@ -52,17 +51,13 @@ class ParameterEditor:
             "alert_cooldown_minutes": int(config.get("bots.analyze.alert_cooldown_minutes", 30)),
             "enabled": True,
             "objective": "short_swings",
-            "trailing": bool(
-                config.get("profit_objectives.short_swings.trailing_stop", True)
-            ),
+            "trailing": bool(config.get("profit_objectives.short_swings.trailing_stop", True)),
         }
 
     def effective_params(self, symbol: str) -> Dict[str, Any]:
         symbol = str(symbol).strip().upper()
         out = self.defaults(symbol)
-        # global overrides
         out.update(self._load_overrides(scope="global", symbol=None))
-        # symbol overrides
         out.update(self._load_overrides(scope="symbol", symbol=symbol))
         return out
 
@@ -71,20 +66,24 @@ class ParameterEditor:
         return self._load_overrides(scope="symbol", symbol=symbol)
 
     def list_overridden_symbols(self, limit: int = 30) -> List[str]:
-        with db.get_session() as session:
-            rows = session.execute(
-                text(
-                    """
-                    SELECT DISTINCT symbol
-                    FROM strategies.parameter_overrides
-                    WHERE scope = 'symbol' AND enabled = TRUE AND symbol IS NOT NULL
-                    ORDER BY symbol
-                    LIMIT :lim
-                    """
-                ),
-                {"lim": limit},
-            ).fetchall()
-        return [r[0] for r in rows]
+        try:
+            with db.get_session() as session:
+                rows = session.execute(
+                    text(
+                        """
+                        SELECT DISTINCT symbol
+                        FROM strategies.parameter_overrides
+                        WHERE scope = 'symbol' AND enabled = TRUE AND symbol IS NOT NULL
+                        ORDER BY symbol
+                        LIMIT :lim
+                        """
+                    ),
+                    {"lim": limit},
+                ).fetchall()
+            return [r[0] for r in rows]
+        except Exception as exc:
+            self.logger.debug(f"list symbols failed: {exc}")
+            return []
 
     def apply(
         self,
@@ -93,7 +92,6 @@ class ParameterEditor:
         source: str = "telegram",
         updated_by: str = "telegram",
     ) -> Dict[str, Any]:
-        """Apply key=value updates. Returns {ok, applied, errors}."""
         symbol = str(symbol).strip().upper()
         applied: Dict[str, Any] = {}
         errors: List[str] = []
@@ -139,10 +137,6 @@ class ParameterEditor:
         return {"ok": True, "cleared": list(existing.keys()), "effective": self.effective_params(symbol)}
 
     def parse_kv_args(self, args: List[str]) -> Tuple[Optional[str], Dict[str, str], Optional[str]]:
-        """
-        Parse: SYMBOL k=v k=v ...  or SYMBOL reset
-        Returns (symbol, updates, special) where special is 'reset' or None.
-        """
         if not args:
             return None, {}, None
         symbol = args[0].strip().upper()
@@ -157,7 +151,6 @@ class ParameterEditor:
             updates[k.strip()] = v.strip()
         return symbol, updates, None
 
-    # ── internals ────────────────────────────────────────────────────────────
     def _validate(self, key: str, raw: Any) -> Tuple[bool, Any, Optional[str]]:
         if key not in PARAM_SPEC:
             return False, None, f"مفتاح غير مسموح: {key}"
@@ -193,6 +186,11 @@ class ParameterEditor:
             return False, None, f"قيمة غير صالحة لـ {key}: {exc}"
         return False, None, f"نوع غير مدعوم لـ {key}"
 
+    def _unwrap(self, v: Any) -> Any:
+        if isinstance(v, dict) and "value" in v and len(v) == 1:
+            return v["value"]
+        return v
+
     def _load_overrides(self, scope: str, symbol: Optional[str]) -> Dict[str, Any]:
         try:
             with db.get_session() as session:
@@ -217,17 +215,7 @@ class ParameterEditor:
                         ),
                         {"s": symbol},
                     ).fetchall()
-            out: Dict[str, Any] = {}
-            for k, v in rows:
-                if isinstance(v, (dict, list)):
-                    # JSONB sometimes returns already-decoded; unwrap scalar
-                    if isinstance(v, dict) and "value" in v and len(v) == 1:
-                        out[k] = v["value"]
-                    else:
-                        out[k] = v
-                else:
-                    out[k] = v
-            return out
+            return {k: self._unwrap(v) for k, v in rows}
         except Exception as exc:
             self.logger.debug(f"load overrides failed: {exc}")
             return {}
@@ -247,10 +235,7 @@ class ParameterEditor:
                 ).fetchone()
             if not row:
                 return None
-            v = row[0]
-            if isinstance(v, dict) and "value" in v and len(v) == 1:
-                return v["value"]
-            return v
+            return self._unwrap(row[0])
         except Exception:
             return None
 
@@ -260,16 +245,20 @@ class ParameterEditor:
             session.execute(
                 text(
                     """
+                    DELETE FROM strategies.parameter_overrides
+                    WHERE scope = 'symbol' AND symbol = :s AND param_key = :k
+                      AND strategy_ref IS NULL
+                    """
+                ),
+                {"s": symbol, "k": key},
+            )
+            session.execute(
+                text(
+                    """
                     INSERT INTO strategies.parameter_overrides
                         (scope, symbol, strategy_ref, param_key, param_value, enabled, updated_by, updated_at)
                     VALUES
                         ('symbol', :s, NULL, :k, CAST(:v AS JSONB), TRUE, :by, NOW())
-                    ON CONFLICT (scope, COALESCE(symbol, ''), COALESCE(strategy_ref, ''), param_key)
-                    DO UPDATE SET
-                        param_value = EXCLUDED.param_value,
-                        enabled = TRUE,
-                        updated_by = EXCLUDED.updated_by,
-                        updated_at = NOW()
                     """
                 ),
                 {"s": symbol, "k": key, "v": payload, "by": updated_by},
@@ -293,7 +282,10 @@ class ParameterEditor:
                         INSERT INTO strategies.parameter_audit
                             (symbol, param_key, old_value, new_value, action, source, created_at)
                         VALUES
-                            (:s, :k, CAST(:old AS JSONB), CAST(:new AS JSONB), :a, :src, NOW())
+                            (:s, :k,
+                             CASE WHEN :old IS NULL THEN NULL ELSE CAST(:old AS JSONB) END,
+                             CASE WHEN :new IS NULL THEN NULL ELSE CAST(:new AS JSONB) END,
+                             :a, :src, NOW())
                         """
                     ),
                     {
