@@ -1,7 +1,6 @@
 # Alpha-Engine2 — Docker Compose
-# NOTE: `version` key removed (obsolete in modern Docker Compose)
-# FIX #0: Added TZ=Asia/Riyadh to all services to enforce Saudi timezone (UTC+3)
-# FIX #1: Added REDIS_PASSWORD env var to ALL services that use Redis (NOAUTH fix)
+# Secrets come from .env (env_file). Do not hardcode passwords/tokens here.
+# FastAPI service `api` is disabled by default (profile: api).
 
 services:
 
@@ -9,13 +8,15 @@ services:
   postgres:
     image: timescale/timescaledb:latest-pg15
     container_name: alpha_postgres
+    env_file:
+      - .env
     environment:
-      POSTGRES_USER: alpha_user
-      POSTGRES_PASSWORD: alpha_password_2024
-      POSTGRES_DB: alpha_engine
+      POSTGRES_USER: ${POSTGRES_USER:-alpha_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-alpha_engine}
       PGDATA: /var/lib/postgresql/data/pgdata
-      TZ: Asia/Riyadh
-      PGTZ: Asia/Riyadh
+      TZ: ${TZ:-Asia/Riyadh}
+      PGTZ: ${TZ:-Asia/Riyadh}
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/01_init.sql
@@ -25,7 +26,7 @@ services:
     networks:
       - alpha_network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U alpha_user -d alpha_engine"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-alpha_user} -d ${POSTGRES_DB:-alpha_engine}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -35,9 +36,11 @@ services:
   redis:
     image: redis:7-alpine
     container_name: alpha_redis
-    command: redis-server --appendonly yes --requirepass alpha_redis_password_2024
+    env_file:
+      - .env
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
     environment:
-      TZ: Asia/Riyadh
+      TZ: ${TZ:-Asia/Riyadh}
     volumes:
       - redis_data:/data
     ports:
@@ -45,7 +48,7 @@ services:
     networks:
       - alpha_network
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli -a alpha_redis_password_2024 ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -58,14 +61,18 @@ services:
       dockerfile: Dockerfile
     container_name: alpha_app
     command: python scripts/main.py
+    env_file:
+      - .env
     environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_DB=0
-      - APP_ENV=production
+      - REDIS_HOST=${REDIS_HOST:-redis}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      - REDIS_DB=${REDIS_DB:-0}
+      - DB_HOST=${DB_HOST:-postgres}
+      - DB_PORT=${DB_PORT:-5432}
+      - APP_ENV=${APP_ENV:-production}
       - LOG_LEVEL=INFO
       - PYTHONUNBUFFERED=1
-      - TZ=Asia/Riyadh
+      - TZ=${TZ:-Asia/Riyadh}
       - PYTHONIOENCODING=utf-8
       - LANG=ar_SA.UTF-8
     volumes:
@@ -95,14 +102,18 @@ services:
       dockerfile: Dockerfile
     container_name: alpha_celery_worker
     command: celery -A scripts.celery_app worker --loglevel=info --concurrency=4 --queues=default,high_priority,normal,low_priority,maintenance
+    env_file:
+      - .env
     environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_DB=0
-      - APP_ENV=production
+      - REDIS_HOST=${REDIS_HOST:-redis}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      - REDIS_DB=${REDIS_DB:-0}
+      - DB_HOST=${DB_HOST:-postgres}
+      - DB_PORT=${DB_PORT:-5432}
+      - APP_ENV=${APP_ENV:-production}
       - LOG_LEVEL=INFO
       - PYTHONUNBUFFERED=1
-      - TZ=Asia/Riyadh
+      - TZ=${TZ:-Asia/Riyadh}
       - PYTHONIOENCODING=utf-8
       - LANG=ar_SA.UTF-8
     volumes:
@@ -132,14 +143,18 @@ services:
       dockerfile: Dockerfile
     container_name: alpha_celery_beat
     command: celery -A scripts.celery_app beat --loglevel=info
+    env_file:
+      - .env
     environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_DB=0
-      - APP_ENV=production
+      - REDIS_HOST=${REDIS_HOST:-redis}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      - REDIS_DB=${REDIS_DB:-0}
+      - DB_HOST=${DB_HOST:-postgres}
+      - DB_PORT=${DB_PORT:-5432}
+      - APP_ENV=${APP_ENV:-production}
       - LOG_LEVEL=INFO
       - PYTHONUNBUFFERED=1
-      - TZ=Asia/Riyadh
+      - TZ=${TZ:-Asia/Riyadh}
       - PYTHONIOENCODING=utf-8
       - LANG=ar_SA.UTF-8
     volumes:
@@ -169,14 +184,16 @@ services:
       dockerfile: Dockerfile
     container_name: alpha_flower
     command: celery -A scripts.celery_app flower --port=5555
+    env_file:
+      - .env
     environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_DB=0
-      - APP_ENV=production
+      - REDIS_HOST=${REDIS_HOST:-redis}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      - REDIS_DB=${REDIS_DB:-0}
+      - APP_ENV=${APP_ENV:-production}
       - LOG_LEVEL=INFO
       - PYTHONUNBUFFERED=1
-      - TZ=Asia/Riyadh
+      - TZ=${TZ:-Asia/Riyadh}
       - PYTHONIOENCODING=utf-8
     ports:
       - "5555:5555"
@@ -194,14 +211,16 @@ services:
       dockerfile: Dockerfile
     container_name: alpha_market_reporter
     command: python -m bots.market_reporter.bot
+    env_file:
+      - .env
     environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_DB=0
-      - APP_ENV=production
+      - REDIS_HOST=${REDIS_HOST:-redis}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      - REDIS_DB=${REDIS_DB:-0}
+      - APP_ENV=${APP_ENV:-production}
       - LOG_LEVEL=INFO
       - PYTHONUNBUFFERED=1
-      - TZ=Asia/Riyadh
+      - TZ=${TZ:-Asia/Riyadh}
       - PYTHONIOENCODING=utf-8
       - LANG=ar_SA.UTF-8
     volumes:
@@ -229,14 +248,16 @@ services:
       dockerfile: Dockerfile
     container_name: alpha_dashboard
     command: streamlit run dashboard/app.py --server.port=8501 --server.address=0.0.0.0
+    env_file:
+      - .env
     environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_DB=0
-      - APP_ENV=production
+      - REDIS_HOST=${REDIS_HOST:-redis}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      - REDIS_DB=${REDIS_DB:-0}
+      - APP_ENV=${APP_ENV:-production}
       - LOG_LEVEL=INFO
       - PYTHONUNBUFFERED=1
-      - TZ=Asia/Riyadh
+      - TZ=${TZ:-Asia/Riyadh}
       - PYTHONIOENCODING=utf-8
       - LANG=ar_SA.UTF-8
     ports:
@@ -261,14 +282,16 @@ services:
       dockerfile: Dockerfile
     container_name: alpha_telegram_bot
     command: python scripts/telegram_bot.py
+    env_file:
+      - .env
     environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_DB=0
-      - APP_ENV=production
+      - REDIS_HOST=${REDIS_HOST:-redis}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      - REDIS_DB=${REDIS_DB:-0}
+      - APP_ENV=${APP_ENV:-production}
       - LOG_LEVEL=INFO
       - PYTHONUNBUFFERED=1
-      - TZ=Asia/Riyadh
+      - TZ=${TZ:-Asia/Riyadh}
       - PYTHONIOENCODING=utf-8
       - LANG=ar_SA.UTF-8
     volumes:
@@ -295,8 +318,8 @@ services:
       --strategy FreqAIStrategy
       --freqaimodel LightGBMClassifier
     environment:
-      - TZ=Asia/Riyadh
-      - APP_ENV=production
+      - TZ=${TZ:-Asia/Riyadh}
+      - APP_ENV=${APP_ENV:-production}
       - LOG_LEVEL=INFO
     ports:
       - "8080:8080"
@@ -311,22 +334,27 @@ services:
       - alpha_network
     restart: unless-stopped
 
-
-  # ── FastAPI Operational API ───────────────────────────────────
+  # ── FastAPI Operational API (DISABLED by default) ────────────
+  # Start only when needed:
+  #   docker compose --profile api up -d api
   api:
+    profiles:
+      - api
     build:
       context: .
       dockerfile: Dockerfile
     container_name: alpha_api
     command: uvicorn api.main:app --host 0.0.0.0 --port 8000
+    env_file:
+      - .env
     environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_DB=0
-      - APP_ENV=production
+      - REDIS_HOST=${REDIS_HOST:-redis}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      - REDIS_DB=${REDIS_DB:-0}
+      - APP_ENV=${APP_ENV:-production}
       - LOG_LEVEL=INFO
       - PYTHONUNBUFFERED=1
-      - TZ=Asia/Riyadh
+      - TZ=${TZ:-Asia/Riyadh}
       - PYTHONIOENCODING=utf-8
       - LANG=ar_SA.UTF-8
     ports:
