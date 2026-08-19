@@ -1,13 +1,10 @@
 """
 Alpha-Engine2 Configuration Manager.
 
-Project-local configuration model:
-  * Sensitive project secrets are read from config/config.yaml by default.
-  * Environment variables remain supported for non-sensitive runtime options
-    such as APP_ENV, TZ and DEBUG.
-  * Environment fallback for legacy deployments is best-effort only and is not
-    required for DB_PASSWORD, REDIS_PASSWORD, TELEGRAM_BOT_TOKEN,
-    ADMIN_API_KEY or SAHMK_API_KEY.
+Secrets policy (2026-08):
+  * Sensitive values are read from environment variables first (.env / container env).
+  * config/config.yaml holds non-sensitive settings and placeholders only.
+  * Supports both DB_* and POSTGRES_* names for compatibility.
   * Logs never print secret values.
 """
 from __future__ import annotations
@@ -18,6 +15,26 @@ from typing import Any, Optional
 
 import yaml
 from loguru import logger
+
+try:
+    from dotenv import load_dotenv
+
+    # Load project-root .env if present (safe no-op when missing)
+    _env_path = Path(__file__).resolve().parent.parent / ".env"
+    load_dotenv(_env_path, override=False)
+except ImportError:
+    pass
+
+_SECRET_ENV_ALIASES = {
+    "DB_PASSWORD": ("DB_PASSWORD", "POSTGRES_PASSWORD"),
+    "DB_USER": ("DB_USER", "POSTGRES_USER"),
+    "DB_NAME": ("DB_NAME", "POSTGRES_DB"),
+    "REDIS_PASSWORD": ("REDIS_PASSWORD",),
+    "TELEGRAM_BOT_TOKEN": ("TELEGRAM_BOT_TOKEN",),
+    "TELEGRAM_CHAT_ID": ("TELEGRAM_CHAT_ID",),
+    "SAHMK_API_KEY": ("SAHMK_API_KEY",),
+    "ADMIN_API_KEY": ("ADMIN_API_KEY",),
+}
 
 _SECRET_CONFIG_PATHS = {
     "DB_PASSWORD": ("database", "password"),
@@ -39,8 +56,15 @@ _PLACEHOLDER_VALUES = {
     "your_key_here",
     "your_value_here",
     "your_sahmk_api_key_here",
+    "your_actual_api_key_here",
     "change_me_strong_db_password",
     "change_me_strong_redis_password",
+    "change_me_telegram_bot_token",
+    "change_me_telegram_chat_id",
+    "change_me_admin_api_key",
+    "change_me_sahmk_api_key",
+    "alpha_password_2024",
+    "alpha_redis_password_2024",
 }
 
 
@@ -91,92 +115,131 @@ class ConfigManager:
         return val
 
     def _env(self, name: str, default: Optional[str] = None) -> str:
-        """Read a non-sensitive environment override with a default."""
+        """Read environment value with optional default."""
         value = os.getenv(name)
         if value is not None and str(value).strip() != "":
             return str(value).strip()
         return "" if default is None else str(default)
 
-    def _secret(self, name: str, default: Optional[str] = None, *, allow_env_fallback: bool = True) -> str:
-        """Read a sensitive value from config.yaml first.
+    def _env_first(self, *names: str, default: Optional[str] = None) -> str:
+        for name in names:
+            value = os.getenv(name)
+            if value is not None and str(value).strip() != "" and not _is_placeholder(value):
+                return str(value).strip()
+        return "" if default is None else str(default)
 
-        The optional environment fallback preserves compatibility with old
-        external deployments, but this project no longer requires .env or any
-        environment variable for the sensitive keys listed in
-        _SECRET_CONFIG_PATHS.
-        """
+    def _secret(self, name: str, default: Optional[str] = None) -> str:
+        """Read a sensitive value: environment first, then config.yaml placeholder fallback."""
+        aliases = _SECRET_ENV_ALIASES.get(name, (name,))
+        env_value = self._env_first(*aliases)
+        if env_value and not _is_placeholder(env_value):
+            return env_value
+
         path = _SECRET_CONFIG_PATHS.get(name)
-        value: Any = None
         if path:
-            value = self.get_nested(*path, default=None)
-        if not _is_placeholder(None if value is None else str(value)):
-            return str(value).strip()
-
-        if allow_env_fallback:
-            env_value = os.getenv(name, "").strip()
-            if not _is_placeholder(env_value):
-                return env_value
+            yaml_value = self.get_nested(*path, default=None)
+            if yaml_value is not None and not _is_placeholder(str(yaml_value)):
+                # Legacy path — still accepted but not recommended
+                return str(yaml_value).strip()
 
         return "" if default is None else str(default)
 
     def _required_secret(self, name: str) -> str:
         value = self._secret(name)
         if _is_placeholder(value):
-            path = ".".join(_SECRET_CONFIG_PATHS.get(name, (name,)))
-            raise ValueError(f"Required secret {name} is missing or still a placeholder in config.yaml ({path})")
+            aliases = " / ".join(_SECRET_ENV_ALIASES.get(name, (name,)))
+            raise ValueError(
+                f"Required secret {name} is missing. Set it in .env ({aliases}). "
+                f"Do not store real secrets in config.yaml."
+            )
         return value
 
     def is_production(self) -> bool:
-        return os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "development")).strip().lower() in {"prod", "production"}
+        return os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "development")).strip().lower() in {
+            "prod",
+            "production",
+        }
 
     def validate_startup_secrets(self) -> None:
-        """Validate required secrets from config.yaml without requiring .env."""
-        required = ["DB_PASSWORD", "REDIS_PASSWORD", "ADMIN_API_KEY"]
+        """Validate required secrets from environment."""
+        required = ["DB_PASSWORD", "REDIS_PASSWORD"]
         if self.is_telegram_enabled():
             required.extend(["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"])
         if self.get("sahmk", {}).get("enabled", True):
             required.append("SAHMK_API_KEY")
-        missing = [name for name in required if _is_placeholder(self._secret(name, allow_env_fallback=False))]
+        # ADMIN_API_KEY only required if API is intentionally used
+        missing = [name for name in required if _is_placeholder(self._secret(name))]
         if missing:
-            raise ValueError("Startup blocked; missing/placeholder secrets in config.yaml: " + ", ".join(sorted(set(missing))))
+            raise ValueError(
+                "Startup blocked; missing secrets in environment (.env): " + ", ".join(sorted(set(missing)))
+            )
 
     def get_database_url(self) -> str:
+        explicit = self._env("DATABASE_URL")
+        if explicit and not _is_placeholder(explicit):
+            # Normalize to SQLAlchemy psycopg2 URL if needed
+            if explicit.startswith("postgresql://") and "+psycopg2" not in explicit:
+                return explicit.replace("postgresql://", "postgresql+psycopg2://", 1)
+            return explicit
+
         db = self._config.get("database", {})
-        host = self._env("DB_HOST", db.get("host", "postgres"))
-        port = self._env("DB_PORT", db.get("port", 5432))
-        name = self._env("DB_NAME", db.get("name", "alpha_engine"))
-        user = self._env("DB_USER", db.get("user", "alpha_user"))
+        host = self._env_first("DB_HOST", default=str(db.get("host", "postgres")))
+        port = self._env_first("DB_PORT", default=str(db.get("port", 5432)))
+        name = self._env_first("DB_NAME", "POSTGRES_DB", default=str(db.get("name", "alpha_engine")))
+        user = self._env_first("DB_USER", "POSTGRES_USER", default=str(db.get("user", "alpha_user")))
         password = self._required_secret("DB_PASSWORD")
         return f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{name}"
 
     def get_asyncpg_dsn(self) -> str:
+        explicit = self._env("DATABASE_URL")
+        if explicit and not _is_placeholder(explicit):
+            return explicit.replace("postgresql+psycopg2://", "postgresql://", 1)
+
         db = self._config.get("database", {})
-        host = self._env("DB_HOST", db.get("host", "postgres"))
-        port = self._env("DB_PORT", db.get("port", 5432))
-        name = self._env("DB_NAME", db.get("name", "alpha_engine"))
-        user = self._env("DB_USER", db.get("user", "alpha_user"))
+        host = self._env_first("DB_HOST", default=str(db.get("host", "postgres")))
+        port = self._env_first("DB_PORT", default=str(db.get("port", 5432)))
+        name = self._env_first("DB_NAME", "POSTGRES_DB", default=str(db.get("name", "alpha_engine")))
+        user = self._env_first("DB_USER", "POSTGRES_USER", default=str(db.get("user", "alpha_user")))
         password = self._required_secret("DB_PASSWORD")
         return f"postgresql://{user}:{password}@{host}:{port}/{name}"
 
     def get_redis_url(self, db_index: int = 0) -> str:
-        host = self._env("REDIS_HOST", self.get_nested("redis", "host", default="redis"))
-        port = self._env("REDIS_PORT", self.get_nested("redis", "port", default=6379))
+        explicit = self._env("REDIS_URL")
+        if explicit and not _is_placeholder(explicit):
+            # Allow caller to force db index
+            if str(db_index) != "0":
+                base = explicit.rsplit("/", 1)[0]
+                return f"{base}/{db_index}"
+            return explicit
+
+        host = self._env_first("REDIS_HOST", default=str(self.get_nested("redis", "host", default="redis")))
+        port = self._env_first("REDIS_PORT", default=str(self.get_nested("redis", "port", default=6379)))
         password = self._required_secret("REDIS_PASSWORD")
-        db = self._env("REDIS_DB", db_index)
-        if str(db) != str(db_index):
-            db = db_index
-        logger.debug("[Redis] Connecting to redis://:***@{}:{}/{}", host, port, db)
-        return f"redis://:{password}@{host}:{port}/{db}"
+        db = self._env_first("REDIS_DB", default=str(db_index))
+        try:
+            db_int = int(db)
+        except ValueError:
+            db_int = db_index
+        logger.debug("[Redis] Connecting to redis://:***@{}:{}/{}", host, port, db_int)
+        return f"redis://:{password}@{host}:{port}/{db_int}"
 
     def get_redis_url_for_backend(self) -> str:
         return self.get_redis_url(db_index=1)
 
     def get_redis_connection_params(self, db_index: int = 0) -> dict:
-        host = self._env("REDIS_HOST", self.get_nested("redis", "host", default="redis"))
-        port = int(self._env("REDIS_PORT", self.get_nested("redis", "port", default=6379)))
-        configured_db = self._env("REDIS_DB", db_index)
-        db = db_index if str(configured_db) != str(db_index) else int(configured_db)
-        return {"host": host, "port": port, "db": db, "password": self._required_secret("REDIS_PASSWORD")}
+        host = self._env_first("REDIS_HOST", default=str(self.get_nested("redis", "host", default="redis")))
+        port = int(self._env_first("REDIS_PORT", default=str(self.get_nested("redis", "port", default=6379))))
+        configured_db = self._env_first("REDIS_DB", default=str(db_index))
+        try:
+            db = int(configured_db)
+        except ValueError:
+            db = db_index
+        return {
+            "host": host,
+            "port": port,
+            "db": db,
+            "password": self._required_secret("REDIS_PASSWORD"),
+        }
 
     def get_telegram_token(self) -> str:
         return self._secret("TELEGRAM_BOT_TOKEN")
@@ -192,12 +255,22 @@ class ConfigManager:
 
     def get_sahmk_ws_url(self) -> str:
         sahmk = self._config.get("sahmk", {})
-        base = self._env("SAHMK_WEBSOCKET_URL", sahmk.get("websocket_url", "wss://app.sahmk.sa/ws/v1/stocks/"))
+        base = self._env_first(
+            "SAHMK_WEBSOCKET_URL",
+            default=str(sahmk.get("websocket_url", "wss://app.sahmk.sa/ws/v1/stocks/")),
+        )
         key = self.get_sahmk_api_key()
         sep = "&" if "?" in base else "?"
         if "api_key=" not in base and key:
             return f"{base}{sep}api_key={key}"
         return base
+
+    def get_sahmk_base_url(self) -> str:
+        sahmk = self._config.get("sahmk", {})
+        return self._env_first(
+            "SAHMK_BASE_URL",
+            default=str(sahmk.get("base_url", "https://app.sahmk.sa/api/v1")),
+        )
 
     def is_silent_mode(self) -> bool:
         return bool(self._config.get("silent_mode", False))

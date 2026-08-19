@@ -1,28 +1,37 @@
+# Alpha-Engine2 configuration
+# Secrets (passwords, tokens, API keys) MUST live in .env — not here.
+# Placeholders below are ignored when real values exist in the environment.
+
 sahmk:
-  api_key: shmk_live_447cbe87839b5e9d48d663625386bb4b01bcd4ff3f68a1e8
+  enabled: true
+  api_key: CHANGE_ME_SAHMK_API_KEY
   base_url: https://app.sahmk.sa/api/v1
   websocket_url: wss://app.sahmk.sa/ws/v1/stocks/
   rest_timeout: 30
   websocket_reconnect_delay: 30
   max_retries: 5
   rate_limit_per_minute: 60
+
 telegram:
-  bot_token: 8531313103:AAGif8EfDMoC_tk5bVukuZnRhxUgrgLF34I
-  chat_id: '145514375'
+  bot_token: CHANGE_ME_TELEGRAM_BOT_TOKEN
+  chat_id: CHANGE_ME_TELEGRAM_CHAT_ID
   enabled: true
+
 database:
   host: postgres
   port: 5432
   name: alpha_engine
   user: alpha_user
-  password: alpha_password_2024
+  password: CHANGE_ME_STRONG_DB_PASSWORD
   pool_size: 10
   max_overflow: 20
+
 redis:
   host: redis
   port: 6379
   db: 0
-  password: alpha_redis_password_2024
+  password: CHANGE_ME_STRONG_REDIS_PASSWORD
+
 market:
   timezone: Asia/Riyadh
   open_time: '10:00'
@@ -33,6 +42,7 @@ market:
   - 2
   - 3
   - 4
+
 symbol_universe:
   activity_thresholds:
     active: 1.0
@@ -40,6 +50,7 @@ symbol_universe:
   historical_window_days: 30
   min_historical_candles: 30
   cache_ttl_minutes: 5
+
 scientist:
   default_timeframe: 1m
   generations: 50
@@ -47,6 +58,7 @@ scientist:
   min_sharpe_ratio: 0.5
   reanalysis_interval_days: 7
   symbols_per_run: 5
+
 genetic_engine:
   generations: 10
   population_size: 30
@@ -55,6 +67,7 @@ genetic_engine:
   symbols_per_run: 3
   min_fitness_to_save: 0.05
   reanalysis_days: 7
+
 profit_objectives:
   scalping:
     description: مضاربة خاطفة — صفقات سريعة جداً
@@ -100,6 +113,7 @@ profit_objectives:
     - 0.15
     trailing_stop: true
     fitness_formula: total_profit×0.60 + profit_factor×0.20 - drawdown×0.20
+
 risk_boxes:
   speculation:
     linked_objective: scalping
@@ -125,19 +139,23 @@ risk_boxes:
     max_allocation_pct: 25
     max_open_trades: 3
     color: '#4CAF50'
+
 strategic_analyzer:
   min_confidence_scientist: 0.5
   min_confidence_generic: 0.65
   max_signals_per_run: 100
+
 filters:
   min_candles: 30
   price:
     min: 1.0
     max: 1000.0
+
 logging:
   level: INFO
   rotation: 1 day
   retention: 30 days
+
 bots:
   strategic_analyzer:
     enabled: true
@@ -226,5 +244,6 @@ bots:
     max_file_size_mb: 200
     batch_size: 500
     temp_dir: /tmp/metastock
+
 admin:
-  api_key: alpha_admin_RwSR8RfyxZ765YOjXNdLiFKNB6vPNyecx6Ctus9g3d0
+  api_key: CHANGE_ME_ADMIN_API_KEY

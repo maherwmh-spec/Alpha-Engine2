@@ -2,16 +2,14 @@
 Alpha-Engine2 Redis Manager
 Handles Redis connections and caching operations
 
-Redis password is read from config/config.yaml so the project does not require .env.
+Redis password is read via config_manager (environment / .env first).
 """
 
 import json
 import redis
 from typing import Any, Optional, List
-from datetime import timedelta
 from loguru import logger
 from config.config_manager import config
-
 
 
 class RedisManager:
@@ -22,17 +20,16 @@ class RedisManager:
         self._initialize()
 
     def _initialize(self):
-        """Initialize Redis connection using config/config.yaml"""
+        """Initialize Redis connection using environment-backed config"""
         try:
-            # ── Read connection params from config.yaml ────────────────────────────
-            params   = config.get_redis_connection_params(db_index=0)
-            host     = params['host']
-            port     = int(params['port'])
-            db       = int(params['db'])
-            password = params['password']
+            params = config.get_redis_connection_params(db_index=0)
+            host = params["host"]
+            port = int(params["port"])
+            db = int(params["db"])
+            password = params["password"]
 
             logger.info(
-                f"[RedisManager] Connecting to redis://:{password[:4]}***@{host}:{port}/{db}"
+                f"[RedisManager] Connecting to redis://:***@{host}:{port}/{db}"
             )
 
             self.client = redis.Redis(
@@ -46,7 +43,6 @@ class RedisManager:
                 retry_on_timeout=True,
             )
 
-            # Test connection — will raise if NOAUTH or connection refused
             self.client.ping()
             logger.success(
                 f"[RedisManager] Redis connection initialized successfully "
@@ -54,7 +50,6 @@ class RedisManager:
             )
 
         except ValueError as e:
-            # Missing password — re-raise immediately
             logger.critical(str(e))
             raise
         except redis.exceptions.AuthenticationError as e:
@@ -67,7 +62,6 @@ class RedisManager:
             raise
 
     def test_connection(self) -> bool:
-        """Test Redis connection"""
         try:
             self.client.ping()
             logger.success("[RedisManager] Redis connection test successful")
@@ -76,45 +70,24 @@ class RedisManager:
             logger.error(f"[RedisManager] Redis connection test failed: {e}")
             return False
 
-    # ========================================
-    # Basic Operations
-    # ========================================
-
     def set(self, key: str, value: Any, ttl: Optional[int] = None) -> bool:
-        """
-        Set a key-value pair
-        Args:
-            key: Redis key
-            value: Value to store (will be JSON serialized if not string)
-            ttl: Time to live in seconds
-        """
         try:
             if not isinstance(value, str):
                 value = json.dumps(value, default=str)
-
             if ttl:
                 self.client.setex(key, ttl, value)
             else:
                 self.client.set(key, value)
-
             return True
         except Exception as e:
             logger.error(f"Failed to set key {key}: {e}")
             return False
 
     def get(self, key: str, default: Any = None) -> Any:
-        """
-        Get value by key
-        Args:
-            key: Redis key
-            default: Default value if key doesn't exist
-        """
         try:
             value = self.client.get(key)
             if value is None:
                 return default
-
-            # Try to parse as JSON
             try:
                 return json.loads(value)
             except (json.JSONDecodeError, TypeError):
@@ -124,7 +97,6 @@ class RedisManager:
             return default
 
     def delete(self, key: str) -> bool:
-        """Delete a key"""
         try:
             self.client.delete(key)
             return True
@@ -133,7 +105,6 @@ class RedisManager:
             return False
 
     def exists(self, key: str) -> bool:
-        """Check if key exists"""
         try:
             return bool(self.client.exists(key))
         except Exception as e:
@@ -141,7 +112,6 @@ class RedisManager:
             return False
 
     def expire(self, key: str, ttl: int) -> bool:
-        """Set expiration time for a key"""
         try:
             self.client.expire(key, ttl)
             return True
@@ -149,12 +119,7 @@ class RedisManager:
             logger.error(f"Failed to set expiration for key {key}: {e}")
             return False
 
-    # ========================================
-    # Hash Operations
-    # ========================================
-
     def hset(self, name: str, key: str, value: Any) -> bool:
-        """Set hash field"""
         try:
             if not isinstance(value, str):
                 value = json.dumps(value, default=str)
@@ -165,12 +130,10 @@ class RedisManager:
             return False
 
     def hget(self, name: str, key: str, default: Any = None) -> Any:
-        """Get hash field"""
         try:
             value = self.client.hget(name, key)
             if value is None:
                 return default
-
             try:
                 return json.loads(value)
             except (json.JSONDecodeError, TypeError):
@@ -180,10 +143,8 @@ class RedisManager:
             return default
 
     def hgetall(self, name: str) -> dict:
-        """Get all hash fields"""
         try:
             data = self.client.hgetall(name)
-            # Try to parse JSON values
             result = {}
             for k, v in data.items():
                 try:
@@ -196,7 +157,6 @@ class RedisManager:
             return {}
 
     def hdel(self, name: str, key: str) -> bool:
-        """Delete hash field"""
         try:
             self.client.hdel(name, key)
             return True
@@ -204,12 +164,7 @@ class RedisManager:
             logger.error(f"Failed to delete hash {name}:{key}: {e}")
             return False
 
-    # ========================================
-    # List Operations
-    # ========================================
-
     def lpush(self, key: str, *values: Any) -> bool:
-        """Push values to the left of list"""
         try:
             serialized = [json.dumps(v, default=str) if not isinstance(v, str) else v for v in values]
             self.client.lpush(key, *serialized)
@@ -219,7 +174,6 @@ class RedisManager:
             return False
 
     def rpush(self, key: str, *values: Any) -> bool:
-        """Push values to the right of list"""
         try:
             serialized = [json.dumps(v, default=str) if not isinstance(v, str) else v for v in values]
             self.client.rpush(key, *serialized)
@@ -229,7 +183,6 @@ class RedisManager:
             return False
 
     def lpop(self, key: str) -> Any:
-        """Pop value from the left of list"""
         try:
             value = self.client.lpop(key)
             if value is None:
@@ -243,7 +196,6 @@ class RedisManager:
             return None
 
     def rpop(self, key: str) -> Any:
-        """Pop value from the right of list"""
         try:
             value = self.client.rpop(key)
             if value is None:
@@ -257,7 +209,6 @@ class RedisManager:
             return None
 
     def lrange(self, key: str, start: int = 0, end: int = -1) -> List[Any]:
-        """Get range of values from list"""
         try:
             values = self.client.lrange(key, start, end)
             result = []
@@ -272,19 +223,13 @@ class RedisManager:
             return []
 
     def llen(self, key: str) -> int:
-        """Get length of list"""
         try:
             return self.client.llen(key)
         except Exception as e:
             logger.error(f"Failed to get length of {key}: {e}")
             return 0
 
-    # ========================================
-    # Set Operations
-    # ========================================
-
     def sadd(self, key: str, *values: Any) -> bool:
-        """Add values to set"""
         try:
             serialized = [json.dumps(v, default=str) if not isinstance(v, str) else v for v in values]
             self.client.sadd(key, *serialized)
@@ -294,7 +239,6 @@ class RedisManager:
             return False
 
     def smembers(self, key: str) -> set:
-        """Get all members of set"""
         try:
             values = self.client.smembers(key)
             result = set()
@@ -309,7 +253,6 @@ class RedisManager:
             return set()
 
     def sismember(self, key: str, value: Any) -> bool:
-        """Check if value is in set"""
         try:
             if not isinstance(value, str):
                 value = json.dumps(value, default=str)
@@ -319,7 +262,6 @@ class RedisManager:
             return False
 
     def srem(self, key: str, *values: Any) -> bool:
-        """Remove values from set"""
         try:
             serialized = [json.dumps(v, default=str) if not isinstance(v, str) else v for v in values]
             self.client.srem(key, *serialized)
@@ -328,75 +270,40 @@ class RedisManager:
             logger.error(f"Failed to remove from {key}: {e}")
             return False
 
-    # ========================================
-    # Cache Operations
-    # ========================================
-
     def cache_stock_price(self, symbol: str, price_data: dict, ttl: int = 60):
-        """Cache stock price data"""
-        key = f"price:{symbol}"
-        return self.set(key, price_data, ttl)
+        return self.set(f"price:{symbol}", price_data, ttl)
 
     def get_cached_price(self, symbol: str) -> Optional[dict]:
-        """Get cached stock price"""
-        key = f"price:{symbol}"
-        return self.get(key)
+        return self.get(f"price:{symbol}")
 
     def cache_indicators(self, symbol: str, timeframe: str, indicators: dict, ttl: int = 300):
-        """Cache technical indicators"""
-        key = f"indicators:{symbol}:{timeframe}"
-        return self.set(key, indicators, ttl)
+        return self.set(f"indicators:{symbol}:{timeframe}", indicators, ttl)
 
     def get_cached_indicators(self, symbol: str, timeframe: str) -> Optional[dict]:
-        """Get cached technical indicators"""
-        key = f"indicators:{symbol}:{timeframe}"
-        return self.get(key)
+        return self.get(f"indicators:{symbol}:{timeframe}")
 
     def cache_signal(self, strategy: str, symbol: str, signal: dict, ttl: int = 300):
-        """Cache trading signal"""
-        key = f"signal:{strategy}:{symbol}"
-        return self.set(key, signal, ttl)
+        return self.set(f"signal:{strategy}:{symbol}", signal, ttl)
 
     def get_cached_signal(self, strategy: str, symbol: str) -> Optional[dict]:
-        """Get cached trading signal"""
-        key = f"signal:{strategy}:{symbol}"
-        return self.get(key)
-
-    # ========================================
-    # Bot State Management
-    # ========================================
+        return self.get(f"signal:{strategy}:{symbol}")
 
     def set_bot_state(self, bot_name: str, state: dict):
-        """Set bot state"""
-        key = f"bot:state:{bot_name}"
-        return self.set(key, state)
+        return self.set(f"bot:state:{bot_name}", state)
 
     def get_bot_state(self, bot_name: str) -> Optional[dict]:
-        """Get bot state"""
-        key = f"bot:state:{bot_name}"
-        return self.get(key)
+        return self.get(f"bot:state:{bot_name}")
 
     def set_bot_running(self, bot_name: str):
-        """Mark bot as running"""
-        key = f"bot:running:{bot_name}"
-        return self.set(key, "1", ttl=3600)  # 1 hour TTL
+        return self.set(f"bot:running:{bot_name}", "1", ttl=3600)
 
     def is_bot_running(self, bot_name: str) -> bool:
-        """Check if bot is running"""
-        key = f"bot:running:{bot_name}"
-        return self.exists(key)
+        return self.exists(f"bot:running:{bot_name}")
 
     def clear_bot_running(self, bot_name: str):
-        """Clear bot running flag"""
-        key = f"bot:running:{bot_name}"
-        return self.delete(key)
-
-    # ========================================
-    # Utility Operations
-    # ========================================
+        return self.delete(f"bot:running:{bot_name}")
 
     def flush_all(self):
-        """Flush all data (use with caution!)"""
         try:
             self.client.flushall()
             logger.warning("Redis flushed all data")
@@ -406,7 +313,6 @@ class RedisManager:
             return False
 
     def get_info(self) -> dict:
-        """Get Redis server info"""
         try:
             return self.client.info()
         except Exception as e:
@@ -414,42 +320,35 @@ class RedisManager:
             return {}
 
     def get_memory_usage(self) -> dict:
-        """Get Redis memory usage"""
         try:
-            info = self.client.info('memory')
+            info = self.client.info("memory")
             return {
-                'used_memory': info.get('used_memory', 0),
-                'used_memory_human': info.get('used_memory_human', '0B'),
-                'used_memory_peak': info.get('used_memory_peak', 0),
-                'used_memory_peak_human': info.get('used_memory_peak_human', '0B'),
+                "used_memory": info.get("used_memory", 0),
+                "used_memory_human": info.get("used_memory_human", "0B"),
+                "used_memory_peak": info.get("used_memory_peak", 0),
+                "used_memory_peak_human": info.get("used_memory_peak_human", "0B"),
             }
         except Exception as e:
             logger.error(f"Failed to get memory usage: {e}")
             return {}
 
 
-# Global Redis instance — initialized from config/config.yaml
 redis_manager = RedisManager()
 
 
-# Convenience functions
 def cache_set(key: str, value: Any, ttl: Optional[int] = None) -> bool:
-    """Set cache value"""
     return redis_manager.set(key, value, ttl)
 
 
 def cache_get(key: str, default: Any = None) -> Any:
-    """Get cache value"""
     return redis_manager.get(key, default)
 
 
 def cache_delete(key: str) -> bool:
-    """Delete cache key"""
     return redis_manager.delete(key)
 
 
 if __name__ == "__main__":
-    # Test Redis connection
     print("Testing Redis connection...")
     if redis_manager.test_connection():
         print("✅ Redis connection successful!")
