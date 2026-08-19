@@ -5,6 +5,7 @@ Secrets policy (2026-08):
   * Sensitive values are read from environment variables first (.env / container env).
   * config/config.yaml holds non-sensitive settings and placeholders only.
   * Supports both DB_* and POSTGRES_* names for compatibility.
+  * Passwords with special characters are URL-encoded when building DSNs.
   * Logs never print secret values.
 """
 from __future__ import annotations
@@ -12,6 +13,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import quote_plus
 
 import yaml
 from loguru import logger
@@ -19,7 +21,6 @@ from loguru import logger
 try:
     from dotenv import load_dotenv
 
-    # Load project-root .env if present (safe no-op when missing)
     _env_path = Path(__file__).resolve().parent.parent / ".env"
     load_dotenv(_env_path, override=False)
 except ImportError:
@@ -101,7 +102,6 @@ class ConfigManager:
             self._config = {}
 
     def get(self, key: str, default: Any = None) -> Any:
-        """Get config by top-level key or dot path."""
         if "." not in key:
             return self._config.get(key, default)
         return self.get_nested(*key.split("."), default=default)
@@ -115,7 +115,6 @@ class ConfigManager:
         return val
 
     def _env(self, name: str, default: Optional[str] = None) -> str:
-        """Read environment value with optional default."""
         value = os.getenv(name)
         if value is not None and str(value).strip() != "":
             return str(value).strip()
@@ -129,7 +128,6 @@ class ConfigManager:
         return "" if default is None else str(default)
 
     def _secret(self, name: str, default: Optional[str] = None) -> str:
-        """Read a sensitive value: environment first, then config.yaml placeholder fallback."""
         aliases = _SECRET_ENV_ALIASES.get(name, (name,))
         env_value = self._env_first(*aliases)
         if env_value and not _is_placeholder(env_value):
@@ -139,7 +137,6 @@ class ConfigManager:
         if path:
             yaml_value = self.get_nested(*path, default=None)
             if yaml_value is not None and not _is_placeholder(str(yaml_value)):
-                # Legacy path — still accepted but not recommended
                 return str(yaml_value).strip()
 
         return "" if default is None else str(default)
@@ -161,57 +158,40 @@ class ConfigManager:
         }
 
     def validate_startup_secrets(self) -> None:
-        """Validate required secrets from environment."""
         required = ["DB_PASSWORD", "REDIS_PASSWORD"]
         if self.is_telegram_enabled():
             required.extend(["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"])
         if self.get("sahmk", {}).get("enabled", True):
             required.append("SAHMK_API_KEY")
-        # ADMIN_API_KEY only required if API is intentionally used
         missing = [name for name in required if _is_placeholder(self._secret(name))]
         if missing:
             raise ValueError(
                 "Startup blocked; missing secrets in environment (.env): " + ", ".join(sorted(set(missing)))
             )
 
-    def get_database_url(self) -> str:
-        explicit = self._env("DATABASE_URL")
-        if explicit and not _is_placeholder(explicit):
-            # Normalize to SQLAlchemy psycopg2 URL if needed
-            if explicit.startswith("postgresql://") and "+psycopg2" not in explicit:
-                return explicit.replace("postgresql://", "postgresql+psycopg2://", 1)
-            return explicit
-
+    def _db_components(self) -> tuple:
         db = self._config.get("database", {})
         host = self._env_first("DB_HOST", default=str(db.get("host", "postgres")))
         port = self._env_first("DB_PORT", default=str(db.get("port", 5432)))
         name = self._env_first("DB_NAME", "POSTGRES_DB", default=str(db.get("name", "alpha_engine")))
         user = self._env_first("DB_USER", "POSTGRES_USER", default=str(db.get("user", "alpha_user")))
         password = self._required_secret("DB_PASSWORD")
-        return f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{name}"
+        return host, port, name, user, password
+
+    def get_database_url(self) -> str:
+        """Build SQLAlchemy URL from components with URL-encoded password."""
+        host, port, name, user, password = self._db_components()
+        user_q = quote_plus(user)
+        pass_q = quote_plus(password)
+        return f"postgresql+psycopg2://{user_q}:{pass_q}@{host}:{port}/{name}"
 
     def get_asyncpg_dsn(self) -> str:
-        explicit = self._env("DATABASE_URL")
-        if explicit and not _is_placeholder(explicit):
-            return explicit.replace("postgresql+psycopg2://", "postgresql://", 1)
-
-        db = self._config.get("database", {})
-        host = self._env_first("DB_HOST", default=str(db.get("host", "postgres")))
-        port = self._env_first("DB_PORT", default=str(db.get("port", 5432)))
-        name = self._env_first("DB_NAME", "POSTGRES_DB", default=str(db.get("name", "alpha_engine")))
-        user = self._env_first("DB_USER", "POSTGRES_USER", default=str(db.get("user", "alpha_user")))
-        password = self._required_secret("DB_PASSWORD")
-        return f"postgresql://{user}:{password}@{host}:{port}/{name}"
+        host, port, name, user, password = self._db_components()
+        user_q = quote_plus(user)
+        pass_q = quote_plus(password)
+        return f"postgresql://{user_q}:{pass_q}@{host}:{port}/{name}"
 
     def get_redis_url(self, db_index: int = 0) -> str:
-        explicit = self._env("REDIS_URL")
-        if explicit and not _is_placeholder(explicit):
-            # Allow caller to force db index
-            if str(db_index) != "0":
-                base = explicit.rsplit("/", 1)[0]
-                return f"{base}/{db_index}"
-            return explicit
-
         host = self._env_first("REDIS_HOST", default=str(self.get_nested("redis", "host", default="redis")))
         port = self._env_first("REDIS_PORT", default=str(self.get_nested("redis", "port", default=6379)))
         password = self._required_secret("REDIS_PASSWORD")
@@ -220,8 +200,9 @@ class ConfigManager:
             db_int = int(db)
         except ValueError:
             db_int = db_index
+        pass_q = quote_plus(password)
         logger.debug("[Redis] Connecting to redis://:***@{}:{}/{}", host, port, db_int)
-        return f"redis://:{password}@{host}:{port}/{db_int}"
+        return f"redis://:{pass_q}@{host}:{port}/{db_int}"
 
     def get_redis_url_for_backend(self) -> str:
         return self.get_redis_url(db_index=1)
