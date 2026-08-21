@@ -12,13 +12,14 @@ MetaStock File Parser — Alpha-Engine2
   - F{n}.MWD : ملف بيانات الشموع (رقم 256+)
 
 ملاحظة Tadawul (2026-08):
-  بعض ملفات السوق السعودي تضع رمزاً بعد بايت فارغ في EMASTER،
-  وفي MASTER يكون الرمز عند الإزاحة 36 مع اسم عربي cp1256.
+  - رموز EMASTER بعد بايت فارغ؛ MASTER رمز عند الإزاحة 36؛ أسماء cp1256
+  - Intraday غالباً 8 حقول: DATE, TIME, OPEN, HIGH, LOW, CLOSE, VOL, OI
+  - timeframe يُفرض من مسار المجلد عند الحاجة (Intraday_1min → 1m ...)
 """
 
 from __future__ import annotations
 
-import os
+import re
 import struct
 import zipfile
 import tempfile
@@ -31,7 +32,6 @@ from loguru import logger
 
 
 def _mbf4_to_float(raw: bytes) -> float:
-    """تحويل 4 بايت Microsoft Binary Format (MBF-4) إلى float."""
     if len(raw) < 4:
         return 0.0
     b0, b1, b2, b3 = raw[0], raw[1], raw[2], raw[3]
@@ -57,19 +57,28 @@ def _mbf_date_to_date(raw: bytes) -> Optional[date]:
         year = 1900 + (d // 10000)
         month = (d % 10000) // 100
         day = d % 100
+        if month < 1 or month > 12 or day < 1 or day > 31:
+            return None
         return date(year, month, day)
     except (ValueError, OverflowError):
         return None
 
 
 def _mbf_time_to_time(raw: bytes) -> Optional[Tuple[int, int]]:
+    """MetaStock TIME كـ float بصيغة HHMMSS أو HHMM."""
     val = _mbf4_to_float(raw)
     if val == 0.0:
         return None
     try:
-        t = int(val)
-        hour = t // 10000
-        minute = (t % 10000) // 100
+        t = int(round(val))
+        if t >= 10000:  # HHMMSS
+            hour = t // 10000
+            minute = (t % 10000) // 100
+        else:  # HHMM
+            hour = t // 100
+            minute = t % 100
+        if hour > 23 or minute > 59:
+            return None
         return (hour, minute)
     except (ValueError, OverflowError):
         return None
@@ -84,7 +93,6 @@ def _read_byte(data: bytes) -> int:
 
 
 def _read_str(data: bytes, encoding: str = "latin-1") -> str:
-    """قراءة نص مع تخطي البايتات الصفرية في البداية (مهم لملفات Tadawul EMASTER)."""
     if not data:
         return ""
     i = 0
@@ -101,7 +109,6 @@ def _read_str(data: bytes, encoding: str = "latin-1") -> str:
 
 
 def _read_name(data: bytes) -> str:
-    """اسم السهم: جرّب cp1256 (عربي ويندوز) ثم latin-1."""
     if not data:
         return ""
     i = 0
@@ -150,10 +157,6 @@ class SymbolInfo:
 
 
 def _read_emaster(path: Path) -> List[SymbolInfo]:
-    """
-    قراءة EMASTER (سجل 192 بايت).
-    Tadawul: الرمز قد يبدأ بعد null عند الإزاحة 10؛ _read_str يتخطى الفراغات.
-    """
     symbols: List[SymbolInfo] = []
     record_size = 192
 
@@ -163,7 +166,6 @@ def _read_emaster(path: Path) -> List[SymbolInfo]:
             logger.warning(f"EMASTER header too short: {path}")
             return symbols
 
-        # عدد السجلات: u16 little-endian عند البايت 2 (شائع)، مع احتياط البايت 0
         num_records = _read_short(header[2:4])
         if num_records <= 0 or num_records > 255:
             alt = _read_short(header[0:2])
@@ -179,7 +181,6 @@ def _read_emaster(path: Path) -> List[SymbolInfo]:
             si = SymbolInfo()
             si.file_num = _read_byte(rec[2:3]) or _read_byte(rec[0:1])
             si.num_fields = _read_byte(rec[6:7]) or 7
-            # [10:26] مع تخطي null — يلتقط الرمز عند الإزاحة 11 في ملفات Tadawul
             si.symbol = _read_str(rec[10:26])
             if not si.symbol:
                 si.symbol = _read_str(rec[11:25])
@@ -235,12 +236,6 @@ def _read_xmaster(path: Path) -> List[SymbolInfo]:
 
 
 def _read_master(path: Path) -> List[SymbolInfo]:
-    """
-    قراءة MASTER (سجل 53 بايت).
-
-    التخطيط الكلاسيكي: الرمز عند [3:17]
-    تخطيط Tadawul المشاهد في العيّنة: الرمز عند [36:50]، الاسم العربي عند [7:23]
-    """
     symbols: List[SymbolInfo] = []
     record_size = 53
 
@@ -251,7 +246,6 @@ def _read_master(path: Path) -> List[SymbolInfo]:
 
         num_records = _read_byte(header[2:3])
         if num_records <= 0:
-            # بعض الملفات تضع العدد في u16@0 أو تعتمد 255 سجل بيانات
             num_records = _read_short(header[0:2])
             if num_records <= 0 or num_records > 255:
                 num_records = min(255, max(0, (path.stat().st_size // record_size) - 1))
@@ -266,7 +260,6 @@ def _read_master(path: Path) -> List[SymbolInfo]:
             si.time_frame = chr(rec[1]) if rec[1] and 32 <= rec[1] < 127 else "D"
             si.num_fields = _read_byte(rec[2:3]) or 7
 
-            # Tadawul أولاً ثم الكلاسيكي
             si.symbol = _read_str(rec[36:50])
             if not si.symbol:
                 si.symbol = _read_str(rec[3:17])
@@ -288,30 +281,72 @@ def _read_master(path: Path) -> List[SymbolInfo]:
     return symbols
 
 
-_DEFAULT_COLUMNS = ["DATE", "OPEN", "HIGH", "LOW", "CLOSE", "VOL", "OI"]
+_DEFAULT_COLUMNS_7 = ["DATE", "OPEN", "HIGH", "LOW", "CLOSE", "VOL", "OI"]
+_DEFAULT_COLUMNS_8 = ["DATE", "TIME", "OPEN", "HIGH", "LOW", "CLOSE", "VOL", "OI"]
+
+
+def _default_columns(num_fields: int) -> List[str]:
+    if num_fields >= 8:
+        cols = list(_DEFAULT_COLUMNS_8)
+        while len(cols) < num_fields:
+            cols.append(f"F{len(cols)}")
+        return cols[:num_fields]
+    cols = list(_DEFAULT_COLUMNS_7)
+    while len(cols) < num_fields:
+        cols.append(f"F{len(cols)}")
+    return cols[:num_fields]
 
 
 def _read_dop(dop_path: Path, num_fields: int) -> List[str]:
     if not dop_path.exists():
-        return _DEFAULT_COLUMNS[:num_fields]
+        return _default_columns(num_fields)
 
     try:
         content = dop_path.read_text(encoding="latin-1", errors="replace")
-        import re
-
         cols = re.findall(r'"([^"]+)"', content)
         if cols:
-            return [c.upper() for c in cols]
+            return [c.upper() for c in cols][:num_fields] or _default_columns(num_fields)
     except Exception as e:
         logger.warning(f"Cannot read DOP file {dop_path}: {e}")
 
-    return _DEFAULT_COLUMNS[:num_fields]
+    return _default_columns(num_fields)
+
+
+def _infer_timeframe_from_path(path: Path) -> Optional[str]:
+    """استنتاج الإطار من مسار المجلد (Intraday_1min / 15min / 30min / Daily)."""
+    text = str(path).lower().replace("\\", "/")
+    rules = [
+        (r"intraday[_-]?1\s*min|intraday_1min|/1min/", "1m"),
+        (r"intraday[_-]?15\s*min|intraday_15min|/15min/", "15m"),
+        (r"intraday[_-]?30\s*min|intraday_30min|/30min/", "30m"),
+        (r"intraday[_-]?5\s*min|intraday_5min|/5min/", "5m"),
+        (r"intraday[_-]?60|/1h/|intraday_1h", "1h"),
+        (r"/daily/|\\daily\\", "1d"),
+    ]
+    for pattern, tf in rules:
+        if re.search(pattern, text):
+            return tf
+    return None
+
+
+def _normalize_timeframe(tf_char: str) -> str:
+    mapping = {
+        "D": "1d",
+        "W": "1w",
+        "M": "1M",
+        "I": "1m",
+        "Q": "15m",
+        "H": "1h",
+        "T": "1m",
+    }
+    return mapping.get((tf_char or "D").upper(), "1d")
 
 
 def _read_dat_file(
     dat_path: Path,
     si: SymbolInfo,
     dop_path: Optional[Path] = None,
+    timeframe_override: Optional[str] = None,
 ) -> pd.DataFrame:
     if not dat_path.exists():
         logger.warning(f"DAT file not found: {dat_path}")
@@ -325,10 +360,15 @@ def _read_dat_file(
     if dop_path and dop_path.exists():
         columns = _read_dop(dop_path, si.num_fields)
     else:
-        columns = _DEFAULT_COLUMNS[: si.num_fields]
+        columns = _default_columns(si.num_fields)
+
+    # إذا 8 حقول ولم يظهر TIME في الأسماء، افرض التخطيط القياسي للـ intraday
+    if si.num_fields >= 8 and "TIME" not in [c.upper() for c in columns]:
+        columns = _default_columns(si.num_fields)
 
     rows = []
     field_size = 4
+    tf = timeframe_override or _normalize_timeframe(si.time_frame)
 
     with open(dat_path, "rb") as fh:
         max_recs = _read_short(fh.read(2))
@@ -336,7 +376,6 @@ def _read_dat_file(
         fh.read(24)
 
         num_candles = max(0, last_rec - 1)
-        # إن فشل تفسير الرأس، قدّر من حجم الملف
         rec_bytes = max(1, si.num_fields) * field_size
         est = max(0, (file_size - 28) // rec_bytes)
         if num_candles <= 0 or num_candles > est + 5:
@@ -344,7 +383,7 @@ def _read_dat_file(
 
         logger.debug(
             f"DAT {dat_path.name}: max_recs={max_recs}, last_rec={last_rec}, "
-            f"candles={num_candles}, fields={si.num_fields}"
+            f"candles={num_candles}, fields={si.num_fields}, cols={columns}, tf={tf}"
         )
 
         for _ in range(num_candles):
@@ -354,22 +393,25 @@ def _read_dat_file(
 
             row_data: Dict[str, object] = {}
             for i, col_name in enumerate(columns):
+                if i >= si.num_fields:
+                    break
                 chunk = raw_row[i * field_size : (i + 1) * field_size]
-                if col_name == "DATE":
+                cu = col_name.upper()
+                if cu == "DATE":
                     row_data["date"] = _mbf_date_to_date(chunk)
-                elif col_name == "TIME":
+                elif cu == "TIME":
                     row_data["time_hm"] = _mbf_time_to_time(chunk)
-                elif col_name in ("OPEN",):
+                elif cu == "OPEN":
                     row_data["open"] = round(_mbf4_to_float(chunk), 4)
-                elif col_name in ("HIGH",):
+                elif cu == "HIGH":
                     row_data["high"] = round(_mbf4_to_float(chunk), 4)
-                elif col_name in ("LOW",):
+                elif cu == "LOW":
                     row_data["low"] = round(_mbf4_to_float(chunk), 4)
-                elif col_name in ("CLOSE",):
+                elif cu == "CLOSE":
                     row_data["close"] = round(_mbf4_to_float(chunk), 4)
-                elif col_name in ("VOL", "VOLUME"):
+                elif cu in ("VOL", "VOLUME"):
                     row_data["volume"] = int(_mbf4_to_float(chunk))
-                elif col_name in ("OI",):
+                elif cu in ("OI", "OPENINTEREST", "OPEN_INTEREST"):
                     row_data["open_interest"] = int(_mbf4_to_float(chunk))
 
             if "date" not in row_data or row_data["date"] is None:
@@ -386,7 +428,7 @@ def _read_dat_file(
                 {
                     "time": dt,
                     "symbol": si.symbol.upper(),
-                    "timeframe": _normalize_timeframe(si.time_frame),
+                    "timeframe": tf,
                     "open": row_data.get("open", 0.0),
                     "high": row_data.get("high", 0.0),
                     "low": row_data.get("low", 0.0),
@@ -406,25 +448,16 @@ def _read_dat_file(
     return df
 
 
-def _normalize_timeframe(tf_char: str) -> str:
-    mapping = {
-        "D": "1d",
-        "W": "1w",
-        "M": "1M",
-        "I": "1m",
-        "Q": "15m",
-        "H": "1h",
-        "T": "1m",
-    }
-    return mapping.get((tf_char or "D").upper(), "1d")
-
-
 class MetaStockParser:
     """محلل ملفات MetaStock الرئيسي."""
 
-    def __init__(self, data_dir: str | Path):
+    def __init__(self, data_dir: str | Path, timeframe_override: Optional[str] = None):
         self.data_dir = Path(data_dir)
         self._symbols: Optional[List[SymbolInfo]] = None
+        # أولوية: معامل صريح → استنتاج من المسار → حرف الفهرس
+        self.timeframe_override = timeframe_override or _infer_timeframe_from_path(
+            self.data_dir
+        )
 
     def _find_index_file(self) -> Tuple[Optional[Path], str]:
         candidates = {"XMASTER": None, "EMASTER": None, "MASTER": None}
@@ -454,7 +487,6 @@ class MetaStockParser:
             self._symbols = _read_xmaster(idx_path)
         elif idx_type == "EMASTER":
             self._symbols = _read_emaster(idx_path)
-            # إن فشل EMASTER رغم وجود MASTER، جرّب MASTER
             if not self._symbols:
                 master_path = None
                 for f in self.data_dir.iterdir():
@@ -462,9 +494,7 @@ class MetaStockParser:
                         master_path = f
                         break
                 if master_path:
-                    logger.warning(
-                        "EMASTER أعاد 0 رموز — محاولة MASTER كاحتياط"
-                    )
+                    logger.warning("EMASTER أعاد 0 رموز — محاولة MASTER كاحتياط")
                     self._symbols = _read_master(master_path)
         else:
             self._symbols = _read_master(idx_path)
@@ -473,11 +503,12 @@ class MetaStockParser:
 
     def list_symbols(self) -> List[Dict]:
         symbols = self._load_symbols()
+        tf_default = self.timeframe_override
         return [
             {
                 "symbol": s.symbol,
                 "name": s.name,
-                "timeframe": _normalize_timeframe(s.time_frame),
+                "timeframe": tf_default or _normalize_timeframe(s.time_frame),
                 "file_num": s.file_num,
                 "first_date": str(s.first_date) if s.first_date else None,
                 "last_date": str(s.last_date) if s.last_date else None,
@@ -530,7 +561,12 @@ class MetaStockParser:
         if dop_path:
             si.columns = _read_dop(dop_path, si.num_fields)
 
-        return _read_dat_file(dat_path, si, dop_path)
+        return _read_dat_file(
+            dat_path,
+            si,
+            dop_path,
+            timeframe_override=self.timeframe_override,
+        )
 
     def _find_file(self, filename: str) -> Optional[Path]:
         direct = self.data_dir / filename
