@@ -5,16 +5,13 @@ MetaStock File Parser — Alpha-Engine2
 ويحوّلها إلى DataFrame جاهز للإدخال في جدول market_data.ohlcv.
 
 تنسيق MetaStock:
-  - MASTER  : فهرس الرموز (حتى 255 رمزاً)، حجم كل سجل = 53 بايت
-  - EMASTER : فهرس موسّع (حتى 255 رمزاً)، حجم كل سجل = 192 بايت
-  - XMASTER : فهرس موسّع جديد (أكثر من 255 رمزاً)، حجم كل سجل = 150 بايت
-  - F{n}.DAT : ملف بيانات الشموع (رقم 1-255)
-  - F{n}.MWD : ملف بيانات الشموع (رقم 256+)
+  - MASTER / EMASTER / XMASTER + F{n}.DAT / F{n}.MWD
 
-ملاحظة Tadawul (2026-08):
-  - رموز EMASTER بعد بايت فارغ؛ MASTER رمز عند الإزاحة 36؛ أسماء cp1256
-  - Intraday غالباً 8 حقول: DATE, TIME, OPEN, HIGH, LOW, CLOSE, VOL, OI
-  - timeframe يُفرض من مسار المجلد عند الحاجة (Intraday_1min → 1m ...)
+ملاحظات Tadawul (2026-08):
+  - رموز EMASTER بعد null؛ MASTER رمز@36؛ أسماء cp1256
+  - Intraday غالباً 8 حقول. بعض الملفات: الحقل0 = padding صفر،
+    ثم DATE, TIME, OPEN, HIGH, LOW, CLOSE, VOL
+  - timeframe من مسار المجلد عند الحاجة
 """
 
 from __future__ import annotations
@@ -57,6 +54,8 @@ def _mbf_date_to_date(raw: bytes) -> Optional[date]:
         year = 1900 + (d // 10000)
         month = (d % 10000) // 100
         day = d % 100
+        if year < 1980 or year > 2100:
+            return None
         if month < 1 or month > 12 or day < 1 or day > 31:
             return None
         return date(year, month, day)
@@ -65,7 +64,6 @@ def _mbf_date_to_date(raw: bytes) -> Optional[date]:
 
 
 def _mbf_time_to_time(raw: bytes) -> Optional[Tuple[int, int]]:
-    """MetaStock TIME كـ float بصيغة HHMMSS أو HHMM."""
     val = _mbf4_to_float(raw)
     if val == 0.0:
         return None
@@ -283,11 +281,22 @@ def _read_master(path: Path) -> List[SymbolInfo]:
 
 _DEFAULT_COLUMNS_7 = ["DATE", "OPEN", "HIGH", "LOW", "CLOSE", "VOL", "OI"]
 _DEFAULT_COLUMNS_8 = ["DATE", "TIME", "OPEN", "HIGH", "LOW", "CLOSE", "VOL", "OI"]
+# بعض ملفات Tadawul Intraday: حقل أول صفر (padding)
+_DEFAULT_COLUMNS_8_PADDED = [
+    "PAD",
+    "DATE",
+    "TIME",
+    "OPEN",
+    "HIGH",
+    "LOW",
+    "CLOSE",
+    "VOL",
+]
 
 
-def _default_columns(num_fields: int) -> List[str]:
+def _default_columns(num_fields: int, padded: bool = False) -> List[str]:
     if num_fields >= 8:
-        cols = list(_DEFAULT_COLUMNS_8)
+        cols = list(_DEFAULT_COLUMNS_8_PADDED if padded else _DEFAULT_COLUMNS_8)
         while len(cols) < num_fields:
             cols.append(f"F{len(cols)}")
         return cols[:num_fields]
@@ -313,7 +322,6 @@ def _read_dop(dop_path: Path, num_fields: int) -> List[str]:
 
 
 def _infer_timeframe_from_path(path: Path) -> Optional[str]:
-    """استنتاج الإطار من مسار المجلد (Intraday_1min / 15min / 30min / Daily)."""
     text = str(path).lower().replace("\\", "/")
     rules = [
         (r"intraday[_-]?1\s*min|intraday_1min|/1min/", "1m"),
@@ -342,6 +350,27 @@ def _normalize_timeframe(tf_char: str) -> str:
     return mapping.get((tf_char or "D").upper(), "1d")
 
 
+def _detect_padded_layout(sample_rows: List[bytes], num_fields: int) -> bool:
+    """
+    إذا كان الحقل0 دائماً صفراً والحقل1 تاريخاً صالحاً → تخطيط padded.
+    """
+    if num_fields < 8 or not sample_rows:
+        return False
+    zero0 = 0
+    date1 = 0
+    for raw in sample_rows:
+        if len(raw) < num_fields * 4:
+            continue
+        f0 = raw[0:4]
+        f1 = raw[4:8]
+        if _mbf4_to_float(f0) == 0.0:
+            zero0 += 1
+        if _mbf_date_to_date(f1) is not None:
+            date1 += 1
+    n = len(sample_rows)
+    return n > 0 and zero0 >= max(1, n // 2) and date1 >= max(1, n // 2)
+
+
 def _read_dat_file(
     dat_path: Path,
     si: SymbolInfo,
@@ -357,17 +386,8 @@ def _read_dat_file(
         logger.warning(f"DAT file too small (possibly corrupt): {dat_path}")
         return pd.DataFrame()
 
-    if dop_path and dop_path.exists():
-        columns = _read_dop(dop_path, si.num_fields)
-    else:
-        columns = _default_columns(si.num_fields)
-
-    # إذا 8 حقول ولم يظهر TIME في الأسماء، افرض التخطيط القياسي للـ intraday
-    if si.num_fields >= 8 and "TIME" not in [c.upper() for c in columns]:
-        columns = _default_columns(si.num_fields)
-
-    rows = []
     field_size = 4
+    rec_bytes = max(1, si.num_fields) * field_size
     tf = timeframe_override or _normalize_timeframe(si.time_frame)
 
     with open(dat_path, "rb") as fh:
@@ -376,16 +396,41 @@ def _read_dat_file(
         fh.read(24)
 
         num_candles = max(0, last_rec - 1)
-        rec_bytes = max(1, si.num_fields) * field_size
         est = max(0, (file_size - 28) // rec_bytes)
         if num_candles <= 0 or num_candles > est + 5:
             num_candles = est
 
+        # عيّنة لاكتشاف التخطيط
+        sample: List[bytes] = []
+        pos_after_header = fh.tell()
+        for _ in range(min(20, num_candles)):
+            raw = fh.read(si.num_fields * field_size)
+            if len(raw) < si.num_fields * field_size:
+                break
+            sample.append(raw)
+        fh.seek(pos_after_header)
+
+        if dop_path and dop_path.exists():
+            columns = _read_dop(dop_path, si.num_fields)
+        else:
+            columns = _default_columns(si.num_fields)
+
+        padded = False
+        if si.num_fields >= 8:
+            padded = _detect_padded_layout(sample, si.num_fields)
+            if padded:
+                columns = _default_columns(si.num_fields, padded=True)
+                logger.debug(f"DAT {dat_path.name}: detected padded DATE/TIME layout")
+            elif "TIME" not in [c.upper() for c in columns]:
+                columns = _default_columns(si.num_fields, padded=False)
+
         logger.debug(
             f"DAT {dat_path.name}: max_recs={max_recs}, last_rec={last_rec}, "
-            f"candles={num_candles}, fields={si.num_fields}, cols={columns}, tf={tf}"
+            f"candles={num_candles}, fields={si.num_fields}, cols={columns}, "
+            f"tf={tf}, padded={padded}"
         )
 
+        rows = []
         for _ in range(num_candles):
             raw_row = fh.read(si.num_fields * field_size)
             if len(raw_row) < si.num_fields * field_size:
@@ -397,6 +442,8 @@ def _read_dat_file(
                     break
                 chunk = raw_row[i * field_size : (i + 1) * field_size]
                 cu = col_name.upper()
+                if cu in ("PAD", "F0", "UNUSED"):
+                    continue
                 if cu == "DATE":
                     row_data["date"] = _mbf_date_to_date(chunk)
                 elif cu == "TIME":
@@ -424,17 +471,25 @@ def _read_dat_file(
             else:
                 dt = datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
 
+            o = float(row_data.get("open", 0.0) or 0.0)
+            h = float(row_data.get("high", 0.0) or 0.0)
+            low = float(row_data.get("low", 0.0) or 0.0)
+            c = float(row_data.get("close", 0.0) or 0.0)
+            # تخطّي صفوف بلا سعر منطقي
+            if o <= 0 and h <= 0 and low <= 0 and c <= 0:
+                continue
+
             rows.append(
                 {
                     "time": dt,
                     "symbol": si.symbol.upper(),
                     "timeframe": tf,
-                    "open": row_data.get("open", 0.0),
-                    "high": row_data.get("high", 0.0),
-                    "low": row_data.get("low", 0.0),
-                    "close": row_data.get("close", 0.0),
-                    "volume": row_data.get("volume", 0),
-                    "open_interest": row_data.get("open_interest", 0),
+                    "open": o,
+                    "high": h,
+                    "low": low,
+                    "close": c,
+                    "volume": int(row_data.get("volume", 0) or 0),
+                    "open_interest": int(row_data.get("open_interest", 0) or 0),
                     "source": "metastock",
                 }
             )
@@ -449,12 +504,9 @@ def _read_dat_file(
 
 
 class MetaStockParser:
-    """محلل ملفات MetaStock الرئيسي."""
-
     def __init__(self, data_dir: str | Path, timeframe_override: Optional[str] = None):
         self.data_dir = Path(data_dir)
         self._symbols: Optional[List[SymbolInfo]] = None
-        # أولوية: معامل صريح → استنتاج من المسار → حرف الفهرس
         self.timeframe_override = timeframe_override or _infer_timeframe_from_path(
             self.data_dir
         )
@@ -465,7 +517,6 @@ class MetaStockParser:
             upper = f.name.upper()
             if upper in candidates:
                 candidates[upper] = f
-
         for name in ("XMASTER", "EMASTER", "MASTER"):
             if candidates[name]:
                 return candidates[name], name
@@ -541,7 +592,6 @@ class MetaStockParser:
 
         if not frames:
             return pd.DataFrame()
-
         combined = pd.concat(frames, ignore_index=True)
         logger.info(f"إجمالي الشموع المحللة: {len(combined):,}")
         return combined
@@ -550,17 +600,13 @@ class MetaStockParser:
         ext = "DAT" if si.file_num <= 255 else "MWD"
         dat_name = f"F{si.file_num}.{ext}"
         dop_name = f"F{si.file_num}.DOP"
-
         dat_path = self._find_file(dat_name)
         dop_path = self._find_file(dop_name)
-
         if dat_path is None:
             logger.warning(f"ملف البيانات غير موجود: {dat_name}")
             return pd.DataFrame()
-
         if dop_path:
             si.columns = _read_dop(dop_path, si.num_fields)
-
         return _read_dat_file(
             dat_path,
             si,
@@ -585,18 +631,14 @@ def extract_metastock_zip(
     zip_path = Path(zip_path)
     if not zip_path.exists():
         raise FileNotFoundError(f"ملف ZIP غير موجود: {zip_path}")
-
     if extract_to is None:
         extract_to = Path(tempfile.mkdtemp(prefix="metastock_"))
     else:
         extract_to = Path(extract_to)
         extract_to.mkdir(parents=True, exist_ok=True)
-
     logger.info(f"فك ضغط {zip_path.name} → {extract_to}")
-
     with zipfile.ZipFile(zip_path, "r") as zf:
         zf.extractall(extract_to)
-
     contents = list(extract_to.iterdir())
     if len(contents) == 1 and contents[0].is_dir():
         return contents[0]
