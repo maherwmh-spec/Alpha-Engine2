@@ -2,6 +2,8 @@
 Bot 5: Monitor (المُراقِب)
 Monitors signals and sends final alerts
 Phase 5: also checks active_monitoring + paper trades via AnalyzeService
+
+Price moves read from market_data.ohlcv (1m preferred) — stock_prices table removed/legacy.
 """
 
 from typing import List, Dict, Tuple
@@ -25,28 +27,48 @@ class Monitor:
         self.alert_threshold = self.config.get('alert_threshold', 0.01)  # 1%
     
     def check_price_movements(self) -> List[Dict]:
-        """Check for significant price movements"""
+        """Check for significant price movements using market_data.ohlcv."""
         try:
             alerts = []
             
             with db.get_session() as session:
+                # Prefer 1m bars in the last hour; fall back to any timeframe if needed
                 query = text("""
-                SELECT DISTINCT symbol FROM market_data.stock_prices
+                SELECT DISTINCT symbol FROM market_data.ohlcv
                 WHERE time > NOW() - INTERVAL '1 hour'
+                  AND timeframe = '1m'
                 """)
                 result = session.execute(query)
                 symbols = [row[0] for row in result.fetchall()]
+                if not symbols:
+                    query = text("""
+                    SELECT DISTINCT symbol FROM market_data.ohlcv
+                    WHERE time > NOW() - INTERVAL '1 day'
+                      AND timeframe IN ('15m', '30m', '1d')
+                    """)
+                    result = session.execute(query)
+                    symbols = [row[0] for row in result.fetchall()]
             
             for symbol in symbols:
                 with db.get_session() as session:
                     query = text("""
-                    SELECT close FROM market_data.stock_prices
+                    SELECT close FROM market_data.ohlcv
                     WHERE symbol = :symbol
+                      AND timeframe = '1m'
                     ORDER BY time DESC
                     LIMIT 2
                     """)
                     result = session.execute(query, {'symbol': symbol})
                     prices = [row[0] for row in result.fetchall()]
+                    if len(prices) < 2:
+                        query = text("""
+                        SELECT close FROM market_data.ohlcv
+                        WHERE symbol = :symbol
+                        ORDER BY time DESC
+                        LIMIT 2
+                        """)
+                        result = session.execute(query, {'symbol': symbol})
+                        prices = [row[0] for row in result.fetchall()]
                 
                 if len(prices) >= 2:
                     change_pct = calculate_percentage_change(prices[1], prices[0])

@@ -3,11 +3,12 @@ Alpha-Engine2 Database Manager
 Handles database connections and operations using SQLAlchemy 2.x
 """
 
+import json
 from sqlalchemy import create_engine, MetaData, text
 from sqlalchemy.orm import sessionmaker, declarative_base, Session
 from sqlalchemy.pool import QueuePool
 from contextlib import contextmanager
-from typing import Generator, Optional
+from typing import Generator, Optional, Any
 from datetime import datetime
 from loguru import logger
 
@@ -16,6 +17,17 @@ from config.config_manager import config
 
 # Create base class for declarative models
 Base = declarative_base()
+
+
+def _json_param(value: Any) -> Optional[str]:
+    """Serialize dict/list metadata for PostgreSQL JSON/JSONB columns."""
+    if value is None:
+        return None
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, default=str)
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, default=str)
 
 
 class DatabaseManager:
@@ -77,7 +89,7 @@ class DatabaseManager:
         """Test database connection (SQLAlchemy 2.x compatible)"""
         try:
             with self.engine.connect() as conn:
-                conn.execute(text("SELECT 1"))   # ← FIX: text() required in SQLAlchemy 2.x
+                conn.execute(text("SELECT 1"))
             logger.success("Database connection test successful")
             return True
         except Exception as e:
@@ -167,11 +179,12 @@ def insert_signal(session: Session, strategy_name: str, symbol: str,
     session.execute(text("""
         INSERT INTO strategies.signals
         (timestamp, strategy_name, symbol, signal_type, price, confidence, timeframe, metadata)
-        VALUES (:timestamp, :strategy_name, :symbol, :signal_type, :price, :confidence, :timeframe, :metadata)
+        VALUES (:timestamp, :strategy_name, :symbol, :signal_type, :price, :confidence, :timeframe, CAST(:metadata AS jsonb))
     """), {
         'timestamp': datetime.now(), 'strategy_name': strategy_name,
         'symbol': symbol, 'signal_type': signal_type, 'price': price,
-        'confidence': confidence, 'timeframe': timeframe, 'metadata': metadata
+        'confidence': confidence, 'timeframe': timeframe,
+        'metadata': _json_param(metadata),
     })
 
 
@@ -182,20 +195,20 @@ def insert_alert(session: Session, alert_type: str, priority: int,
     session.execute(text("""
         INSERT INTO alerts.notifications
         (timestamp, alert_type, priority, title, message, symbol, strategy_name, metadata)
-        VALUES (:timestamp, :alert_type, :priority, :title, :message, :symbol, :strategy_name, :metadata)
+        VALUES (:timestamp, :alert_type, :priority, :title, :message, :symbol, :strategy_name, CAST(:metadata AS jsonb))
     """), {
         'timestamp': datetime.now(), 'alert_type': alert_type, 'priority': priority,
         'title': title, 'message': message, 'symbol': symbol,
-        'strategy_name': strategy_name, 'metadata': metadata
+        'strategy_name': strategy_name, 'metadata': _json_param(metadata),
     })
 
 
 def update_bot_status(session: Session, bot_name: str, status: str,
                       error_message: str = None, metadata: dict = None):
-    """Update bot status"""
+    """Update bot status — metadata always JSON-serialised for PostgreSQL."""
     session.execute(text("""
         INSERT INTO bots.status (bot_name, status, last_run, error_message, metadata)
-        VALUES (:bot_name, :status, :last_run, :error_message, :metadata)
+        VALUES (:bot_name, :status, :last_run, :error_message, CAST(:metadata AS jsonb))
         ON CONFLICT (bot_name) DO UPDATE
         SET status = EXCLUDED.status,
             last_run = EXCLUDED.last_run,
@@ -204,7 +217,8 @@ def update_bot_status(session: Session, bot_name: str, status: str,
             updated_at = NOW()
     """), {
         'bot_name': bot_name, 'status': status,
-        'last_run': datetime.now(), 'error_message': error_message, 'metadata': metadata
+        'last_run': datetime.now(), 'error_message': error_message,
+        'metadata': _json_param(metadata),
     })
 
 
