@@ -50,11 +50,18 @@ logger.info(
     + ", ".join(_discovered_packages)
 )
 
+# Explicit modules with @shared_task outside bots/*/tasks.py
+_extra_task_modules = [
+    'scripts.sync_symbols',
+    'scripts.retention_policy',
+    'scripts.telegram_bot',  # send_pending_alerts
+]
+
 app = Celery(
     'alpha_engine',
     broker=broker_url,
     backend=result_backend,
-    include=_discovered_packages + ['scripts.sync_symbols', 'scripts.retention_policy'],
+    include=_discovered_packages + _extra_task_modules,
 )
 
 app.conf.update(
@@ -101,6 +108,7 @@ app.conf.task_routes = {
     'bots.evaluator.*':  {'queue': 'default'},
     'bots.self_trainer.*':    {'queue': 'low_priority'},
     'bots.backup_manager.*':  {'queue': 'maintenance'},
+    'scripts.telegram_bot.*': {'queue': 'high_priority'},
 }
 
 app.conf.beat_schedule = {
