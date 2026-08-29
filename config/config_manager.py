@@ -68,6 +68,9 @@ _PLACEHOLDER_VALUES = {
     "alpha_redis_password_2024",
 }
 
+DEFAULT_SAHMK_BASE_URL = "https://api.sahmk.sa/api/v1"
+DEFAULT_SAHMK_WS_URL = "wss://api.sahmk.sa/ws/v1/stocks/"
+
 
 def _is_placeholder(value: Optional[str]) -> bool:
     if value is None:
@@ -238,7 +241,7 @@ class ConfigManager:
         sahmk = self._config.get("sahmk", {})
         base = self._env_first(
             "SAHMK_WEBSOCKET_URL",
-            default=str(sahmk.get("websocket_url", "wss://app.sahmk.sa/ws/v1/stocks/")),
+            default=str(sahmk.get("websocket_url", DEFAULT_SAHMK_WS_URL)),
         )
         key = self.get_sahmk_api_key()
         sep = "&" if "?" in base else "?"
@@ -250,7 +253,7 @@ class ConfigManager:
         sahmk = self._config.get("sahmk", {})
         return self._env_first(
             "SAHMK_BASE_URL",
-            default=str(sahmk.get("base_url", "https://app.sahmk.sa/api/v1")),
+            default=str(sahmk.get("base_url", DEFAULT_SAHMK_BASE_URL)),
         )
 
     def is_silent_mode(self) -> bool:
