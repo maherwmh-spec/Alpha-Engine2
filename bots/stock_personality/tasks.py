@@ -8,6 +8,13 @@ def run_stock_personality(self, symbols=None, max_symbols: int = 0):
     """Nightly stock personality computation (stats + behavioral + phase)."""
     try:
         from bots.stock_personality.bot import StockPersonalityBot
+        from scripts.sahmk_official_market import sync_official_market
+
+        try:
+            market = sync_official_market()
+            logger.info(f"official market snapshot: {market}")
+        except Exception as exc:
+            logger.warning(f"official market snapshot skipped: {exc}")
 
         bot = StockPersonalityBot()
         bot.benchmark = "TASI"
