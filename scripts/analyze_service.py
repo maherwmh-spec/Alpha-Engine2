@@ -8,6 +8,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+import requests
 from loguru import logger
 from sqlalchemy import text
 
@@ -43,7 +44,7 @@ class AnalyzeService:
             self.logger.debug(f"effective params fallback: {exc}")
             return self.default_sl_pct, self.default_tp_pct, {}
 
-    # ── Public API ───────────────────────────────────────────────────────────
+    # ── Public API ───────────────────────────────────────────────────────
     def analyze(self, symbol: str, add_watch: bool = True) -> Dict[str, Any]:
         symbol = str(symbol).strip().upper()
         data = self._collect(symbol)
@@ -419,7 +420,9 @@ class AnalyzeService:
 
     def _collect(self, symbol: str) -> Dict[str, Any]:
         out: Dict[str, Any] = {}
-        out["last_price"] = self._last_price(symbol)
+        price, source = self._last_price_with_source(symbol)
+        out["last_price"] = price
+        out["price_source"] = source
         out["ret_1d"] = None
 
         try:
@@ -519,28 +522,64 @@ class AnalyzeService:
         out["genetic_fitness"] = self._genetic_fitness(symbol)
         return out
 
-    def _last_price(self, symbol: str) -> Optional[float]:
-        queries = [
-            """
-                SELECT close FROM market_data.ohlcv
-                WHERE symbol = :s AND timeframe = '1d'
-                ORDER BY time DESC LIMIT 1
-                """,
-            """
-                SELECT close FROM market_data.ohlcv
-                WHERE symbol = :s
-                ORDER BY time DESC LIMIT 1
-                """,
-        ]
-        for q in queries:
-            try:
-                with db.get_session() as session:
-                    row = session.execute(text(q), {"s": symbol}).fetchone()
-                if row and row[0] is not None:
-                    return float(row[0])
-            except Exception:
-                continue
+    def _ohlcv_close(self, symbol: str, timeframe: str) -> Optional[float]:
+        try:
+            with db.get_session() as session:
+                row = session.execute(
+                    text(
+                        """
+                        SELECT close FROM market_data.ohlcv
+                        WHERE symbol = :s AND timeframe = :tf
+                        ORDER BY time DESC
+                        LIMIT 1
+                        """
+                    ),
+                    {"s": symbol, "tf": timeframe},
+                ).fetchone()
+            if row and row[0] is not None:
+                return float(row[0])
+        except Exception as exc:
+            self.logger.debug(f"ohlcv close {symbol} {timeframe}: {exc}")
         return None
+
+    def _quote_from_sahmk(self, symbol: str) -> Optional[float]:
+        key = (config.get_sahmk_api_key() or "").strip()
+        if not key:
+            return None
+        base = (config.get_sahmk_base_url() or "https://api.sahmk.sa/api/v1").rstrip("/")
+        try:
+            resp = requests.get(
+                f"{base}/quote/{symbol}/",
+                headers={"X-API-Key": key, "Accept": "application/json"},
+                timeout=15,
+            )
+            if resp.status_code != 200:
+                self.logger.debug(f"sahmk quote {symbol}: HTTP {resp.status_code}")
+                return None
+            payload = resp.json() if resp.content else {}
+            price = payload.get("price")
+            if price is None:
+                return None
+            return float(price)
+        except Exception as exc:
+            self.logger.debug(f"sahmk quote {symbol}: {exc}")
+            return None
+
+    def _last_price_with_source(self, symbol: str) -> Tuple[Optional[float], str]:
+        px = self._ohlcv_close(symbol, "1m")
+        if px is not None and px > 0:
+            return px, "1m"
+        px = self._quote_from_sahmk(symbol)
+        if px is not None and px > 0:
+            return px, "quote"
+        px = self._ohlcv_close(symbol, "1d")
+        if px is not None and px > 0:
+            return px, "1d"
+        return None, "none"
+
+    def _last_price(self, symbol: str) -> Optional[float]:
+        price, _source = self._last_price_with_source(symbol)
+        return price
 
     def _genetic_fitness(self, symbol: str) -> Optional[float]:
         queries = [
@@ -571,9 +610,11 @@ class AnalyzeService:
     def _format_html(self, symbol: str, d: Dict[str, Any]) -> str:
         conf = d.get("phase_confidence")
         conf_s = f" · ثقة {float(conf):.0f}%" if conf is not None else ""
+        src = d.get("price_source") or ""
+        src_s = f" ({src})" if src and src not in ("none",) else ""
         lines = [
             f"📊 <b>تحليل {symbol}</b>\n",
-            f"السعر: <b>{self._fmt(d.get('last_price'))}</b> | ret1d: {self._fmt(d.get('ret_1d'), pct=True)}",
+            f"السعر: <b>{self._fmt(d.get('last_price'))}</b>{src_s} | ret1d: {self._fmt(d.get('ret_1d'), pct=True)}",
             f"المرحلة: <b>{d.get('phase') or '—'}</b>{conf_s}",
             f"Beta90: {self._fmt(d.get('beta_90d'), digits=3)} | Vol30: {self._fmt(d.get('vol_30d'), digits=3)}",
             f"RSI14: {self._fmt(d.get('rsi_14'))} | ret5d: {self._fmt(d.get('ret_5d'), pct=True)}",
