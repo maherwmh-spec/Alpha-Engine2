@@ -15,6 +15,16 @@ def _svc() -> AnalyzeService:
     return AnalyzeService()
 
 
+def _conf_s(row: dict) -> str:
+    conf = row.get("phase_confidence")
+    if conf is None:
+        return ""
+    try:
+        return f" · ثقة {float(conf):.0f}%"
+    except (TypeError, ValueError):
+        return ""
+
+
 async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
@@ -39,8 +49,14 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         lines = ["📋 <b>قائمة اليوم</b>\n"]
         for r in rows:
+            score = r.get("score")
+            try:
+                score_s = f"{float(score):.2f}" if score is not None else "—"
+            except (TypeError, ValueError):
+                score_s = str(score)
             lines.append(
-                f"{r['rank']}. <code>{r['symbol']}</code> — {r.get('phase') or '—'} · {r.get('score')}"
+                f"{r['rank']}. <code>{r['symbol']}</code> — {r.get('phase') or '—'}"
+                f"{_conf_s(r)} · درجة {score_s}"
             )
         lines.append("\n<code>/analyze SYMBOL</code>")
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")
