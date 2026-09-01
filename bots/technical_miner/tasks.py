@@ -8,6 +8,9 @@ def run_technical_miner(self):
     """Run technical miner bot task"""
     try:
         from bots.technical_miner.bot import TechnicalMiner
+        from scripts.adx_guard import install_adx_guard
+
+        install_adx_guard(TechnicalMiner)
         miner = TechnicalMiner()
         miner.run()
     except Exception as exc:
