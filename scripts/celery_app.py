@@ -5,11 +5,11 @@ Handles distributed task processing and scheduling
 Dynamic autodiscovery: automatically finds all bots/*/tasks.py
 so that new bots are picked up without touching this file.
 
-Phase 1: Unified genetic-engine-run at 18:00 (DEAP schedule removed).
-Phase 2: stock_personality at 17:30.
-Phase 3: feature_engineer 16:45, sentiment_analyzer 17:00.
-Phase 4: watchlist_generator at 07:30 (morning Telegram list).
-Phase 7: weekly_reviewer Sunday 18:00 (review + self_trainer v1 + report).
+Trading week = Sunday–Thursday (Celery day_of_week 0-4, Asia/Riyadh).
+Nightly: features 16:45, sentiment 17:00, personality 16:30 Sun–Thu.
+Morning watchlist: 08:00 Sun–Thu.
+Weekly reviewer + self_trainer: Friday 18:00.
+Genetic remains scheduled Sun–Thu 18:00 but is not the current quality path.
 """
 
 import os
@@ -111,6 +111,8 @@ app.conf.task_routes = {
     'scripts.telegram_bot.*': {'queue': 'high_priority'},
 }
 
+_WEEKDAYS = '0-4'  # Sunday–Thursday
+
 app.conf.beat_schedule = {
 
     'technical-miner-run': {
@@ -161,55 +163,48 @@ app.conf.beat_schedule = {
     },
     'health-monitor-daily-report': {
         'task': 'bots.health_monitor.tasks.send_daily_report',
-        'schedule': crontab(hour=8, minute=0),
+        'schedule': crontab(hour=8, minute=0, day_of_week=_WEEKDAYS),
         'options': {'queue': 'normal'},
     },
 
-    # Phase 7: weekly review Sunday 18:00 Asia/Riyadh (includes self_trainer v1)
     'weekly-reviewer-run': {
         'task': 'bots.weekly_reviewer.tasks.run_weekly_reviewer',
-        'schedule': crontab(day_of_week=0, hour=18, minute=0),
+        'schedule': crontab(day_of_week=5, hour=18, minute=0),
         'options': {'queue': 'normal'},
     },
 
-    # Phase 3 nightly pipeline (before personality + genetic)
     'feature-engineer-run': {
         'task': 'bots.feature_engineer.tasks.run_feature_engineer',
-        'schedule': crontab(hour=16, minute=45),
+        'schedule': crontab(hour=16, minute=45, day_of_week=_WEEKDAYS),
         'options': {'queue': 'normal'},
     },
     'sentiment-analyzer-run': {
         'task': 'bots.sentiment_analyzer.tasks.run_sentiment_analyzer',
-        'schedule': crontab(hour=17, minute=0),
+        'schedule': crontab(hour=17, minute=0, day_of_week=_WEEKDAYS),
         'options': {'queue': 'normal'},
     },
 
-    # Phase 2: personality before genetic discovery
     'stock-personality-run': {
         'task': 'bots.stock_personality.tasks.run_stock_personality',
-        'schedule': crontab(hour=17, minute=30),
+        'schedule': crontab(hour=16, minute=30, day_of_week=_WEEKDAYS),
         'options': {'queue': 'normal'},
     },
 
-    # Unified Genetic Engine ONLY (Phase 1)
     'genetic-engine-run': {
         'task': 'bots.scientist.tasks.run_genetic_cycle',
-        'schedule': crontab(hour=18, minute=0),
+        'schedule': crontab(hour=18, minute=0, day_of_week=_WEEKDAYS),
         'options': {'queue': 'default'},
     },
 
-    # Phase 4: morning watchlist + Telegram
     'watchlist-generator-run': {
         'task': 'bots.watchlist_generator.tasks.run_watchlist_generator',
-        'schedule': crontab(hour=7, minute=30),
+        'schedule': crontab(hour=8, minute=0, day_of_week=_WEEKDAYS),
         'options': {'queue': 'normal'},
     },
 
-    # self_trainer standalone kept off schedule when disabled;
-    # primary path is inside weekly_reviewer at Sunday 18:00
     'self-trainer-run': {
         'task': 'bots.self_trainer.tasks.run_self_trainer',
-        'schedule': crontab(day_of_week=0, hour=18, minute=15),
+        'schedule': crontab(day_of_week=5, hour=18, minute=15),
         'options': {'queue': 'low_priority'},
     },
     'freqai-manager-run': {
@@ -220,7 +215,7 @@ app.conf.beat_schedule = {
 
     'sync-tasi-symbols': {
         'task': 'scripts.sync_symbols.sync_symbols_task',
-        'schedule': crontab(hour=7, minute=0),
+        'schedule': crontab(hour=7, minute=0, day_of_week=_WEEKDAYS),
         'options': {'queue': 'default'},
     },
 
