@@ -7,8 +7,10 @@ from __future__ import annotations
 from telegram import Update
 from telegram.ext import ContextTypes, CommandHandler
 from loguru import logger
+from sqlalchemy import text
 
 from scripts.analyze_service import AnalyzeService
+from scripts.database import db
 
 
 def _svc() -> AnalyzeService:
@@ -23,6 +25,32 @@ def _conf_s(row: dict) -> str:
         return f" · ثقة {float(conf):.0f}%"
     except (TypeError, ValueError):
         return ""
+
+
+def _attach_phase_confidence(rows: list) -> list:
+    if not rows:
+        return rows
+    symbols = [str(r.get("symbol") or "") for r in rows if r.get("symbol")]
+    if not symbols:
+        return rows
+    try:
+        with db.get_session() as session:
+            found = session.execute(
+                text(
+                    """
+                    SELECT symbol, phase_confidence
+                    FROM market_data.stock_personalities
+                    WHERE symbol IN :syms
+                    """
+                ).bindparams(syms=tuple(symbols)),
+            ).fetchall()
+        conf_map = {r[0]: r[1] for r in found}
+        for row in rows:
+            if row.get("phase_confidence") is None:
+                row["phase_confidence"] = conf_map.get(row.get("symbol"))
+    except Exception as exc:
+        logger.debug(f"watchlist confidence attach failed: {exc}")
+    return rows
 
 
 async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -43,7 +71,7 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        rows = _svc().list_watchlist_today()
+        rows = _attach_phase_confidence(_svc().list_watchlist_today())
         if not rows:
             await update.message.reply_text("لا توجد قائمة مرشّحين لليوم.")
             return
