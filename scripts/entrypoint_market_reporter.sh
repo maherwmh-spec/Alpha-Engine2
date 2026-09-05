@@ -6,7 +6,6 @@ set -e
 
 echo "[entrypoint] Starting market_reporter setup..."
 
-# Install Playwright system dependencies at runtime
 echo "[entrypoint] Installing Playwright system dependencies..."
 apt-get update -qq && apt-get install -y -qq \
     libnss3 \
@@ -24,9 +23,8 @@ apt-get update -qq && apt-get install -y -qq \
     libatspi2.0-0 \
     2>/dev/null || true
 
-# Install Playwright browser
 echo "[entrypoint] Installing Playwright Chromium browser..."
 playwright install chromium 2>/dev/null || echo "[entrypoint] WARNING: playwright install failed, scraping may not work"
 
 echo "[entrypoint] Starting market_reporter bot..."
-exec python -m bots.market_reporter.bot "$@"
+exec python scripts/run_market_reporter.py "$@"
