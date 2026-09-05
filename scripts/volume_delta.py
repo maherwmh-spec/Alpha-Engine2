@@ -38,4 +38,21 @@ def minute_volume_from_cumulative(symbol: str, raw_volume: int, ts: Any = None) 
 
     delta = raw - prev[1]
     _STATE[key] = (day, raw)
-    return max(delta, 0)
+    return max(int(delta), 0)
+
+
+def install_save_hook(cls) -> None:
+    orig = cls._save_candle_to_db
+
+    async def _wrapped(self, candle):
+        c = dict(candle or {})
+        source = c.get("source") or "sahmk_websocket"
+        if source == "sahmk_websocket":
+            c["volume"] = minute_volume_from_cumulative(
+                c.get("symbol", ""),
+                c.get("volume", 0),
+                c.get("timestamp") or c.get("time"),
+            )
+        return await orig(self, c)
+
+    cls._save_candle_to_db = _wrapped
