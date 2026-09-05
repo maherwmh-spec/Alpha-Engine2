@@ -11,6 +11,9 @@ from sqlalchemy import text
 
 from scripts.analyze_service import AnalyzeService
 from scripts.database import db
+from scripts.sahmk_enrich import install_analyze_enrich
+
+install_analyze_enrich()
 
 
 def _svc() -> AnalyzeService:
