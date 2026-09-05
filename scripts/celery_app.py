@@ -6,10 +6,11 @@ Dynamic autodiscovery: automatically finds all bots/*/tasks.py
 so that new bots are picked up without touching this file.
 
 Trading week = Sunday–Thursday (Celery day_of_week 0-4, Asia/Riyadh).
-Nightly: features 16:45, sentiment 17:00, personality 16:30 Sun–Thu.
+Session (09:30–15:30): monitor / miner / hunter only.
+Nightly after close: personality 16:30, features 16:45, sentiment 17:00.
 Morning watchlist: 08:00 Sun–Thu.
 Weekly reviewer + self_trainer: Friday 18:00.
-Genetic remains scheduled Sun–Thu 18:00 but is not the current quality path.
+Genetic: 21:00 Sun–Thu (after close, not during the session).
 """
 
 import os
@@ -50,11 +51,10 @@ logger.info(
     + ", ".join(_discovered_packages)
 )
 
-# Explicit modules with @shared_task outside bots/*/tasks.py
 _extra_task_modules = [
     'scripts.sync_symbols',
     'scripts.retention_policy',
-    'scripts.telegram_bot',  # send_pending_alerts
+    'scripts.telegram_bot',
 ]
 
 app = Celery(
@@ -192,7 +192,7 @@ app.conf.beat_schedule = {
 
     'genetic-engine-run': {
         'task': 'bots.scientist.tasks.run_genetic_cycle',
-        'schedule': crontab(hour=18, minute=0, day_of_week=_WEEKDAYS),
+        'schedule': crontab(hour=21, minute=0, day_of_week=_WEEKDAYS),
         'options': {'queue': 'default'},
     },
 
