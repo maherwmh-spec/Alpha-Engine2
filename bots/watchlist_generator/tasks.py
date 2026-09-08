@@ -1,12 +1,16 @@
 """Celery tasks for watchlist_generator bot (Phase 4)."""
+from datetime import date
+
 from scripts.celery_app import app
 from loguru import logger
 
 
 @app.task(name="bots.watchlist_generator.tasks.run_watchlist_generator", bind=True, max_retries=2)
 def run_watchlist_generator(self, send_telegram: bool = True, trade_date: str = None):
-    """Build daily watchlist and optionally send morning Telegram message."""
+    """Build daily watchlist. Telegram only Sun–Thu (never Fri/Sat)."""
     try:
+        if date.today().weekday() in (4, 5):
+            send_telegram = False
         from bots.watchlist_generator.bot import WatchlistGeneratorBot
 
         bot = WatchlistGeneratorBot()
