@@ -1,17 +1,12 @@
 """
 Alpha-Engine2 Celery Application
-Handles distributed task processing and scheduling
 
-Dynamic autodiscovery: automatically finds all bots/*/tasks.py
-so that new bots are picked up without touching this file.
-
-Trading week = Sunday–Thursday (Celery day_of_week 0-4, Asia/Riyadh).
-Session (09:30–15:30): monitor / miner / hunter only.
-Nightly after close: personality 16:30, features 16:45, sentiment 17:00.
-Morning watchlist: 08:00 Sun–Thu.
-Weekly reviewer + self_trainer: Friday 18:00.
-Genetic: 21:00 Sun–Thu (after close, not during the session).
-Crontab hours are wall-clock Asia/Riyadh (enable_utc=False).
+Genetic:
+  Sun–Thu 21:00 after close.
+  Fri/Sat 10:00 and 21:00 (weekend compute).
+  Sunday 06:00 before watchlist.
+No genetic during Sun–Thu 09:30–15:30.
+Crontab = Asia/Riyadh wall clock (enable_utc=False).
 """
 
 import os
@@ -112,7 +107,7 @@ app.conf.task_routes = {
     'scripts.telegram_bot.*': {'queue': 'high_priority'},
 }
 
-_WEEKDAYS = '0-4'  # Sunday–Thursday
+_WEEKDAYS = '0-4'
 
 app.conf.beat_schedule = {
 
@@ -194,6 +189,21 @@ app.conf.beat_schedule = {
     'genetic-engine-run': {
         'task': 'bots.scientist.tasks.run_genetic_cycle',
         'schedule': crontab(hour=21, minute=0, day_of_week=_WEEKDAYS),
+        'options': {'queue': 'default'},
+    },
+    'genetic-engine-weekend-morning': {
+        'task': 'bots.scientist.tasks.run_genetic_cycle',
+        'schedule': crontab(hour=10, minute=0, day_of_week='5-6'),
+        'options': {'queue': 'default'},
+    },
+    'genetic-engine-weekend-night': {
+        'task': 'bots.scientist.tasks.run_genetic_cycle',
+        'schedule': crontab(hour=21, minute=0, day_of_week='5-6'),
+        'options': {'queue': 'default'},
+    },
+    'genetic-engine-sunday-preopen': {
+        'task': 'bots.scientist.tasks.run_genetic_cycle',
+        'schedule': crontab(hour=6, minute=0, day_of_week='0'),
         'options': {'queue': 'default'},
     },
 
