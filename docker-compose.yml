@@ -4,7 +4,6 @@
 
 services:
 
-  # ── PostgreSQL with TimescaleDB ─────────────────────────────
   postgres:
     image: timescale/timescaledb:latest-pg15
     container_name: alpha_postgres
@@ -32,7 +31,6 @@ services:
       retries: 5
     restart: unless-stopped
 
-  # ── Redis ────────────────────────────────────────────────────
   redis:
     image: redis:7-alpine
     container_name: alpha_redis
@@ -54,7 +52,6 @@ services:
       retries: 5
     restart: unless-stopped
 
-  # ── Main Application ─────────────────────────────────────────
   app:
     build:
       context: .
@@ -95,7 +92,6 @@ services:
       start_period: 60s
     restart: unless-stopped
 
-  # ── Celery Worker ────────────────────────────────────────────
   celery_worker:
     build:
       context: .
@@ -136,7 +132,6 @@ services:
       start_period: 90s
     restart: unless-stopped
 
-  # ── Celery Beat (Scheduler) ──────────────────────────────────
   celery_beat:
     build:
       context: .
@@ -177,7 +172,6 @@ services:
       start_period: 60s
     restart: unless-stopped
 
-  # ── Flower (Celery Monitoring) ───────────────────────────────
   flower:
     build:
       context: .
@@ -204,13 +198,12 @@ services:
       - alpha_network
     restart: unless-stopped
 
-  # ── Market Reporter ──────────────────────────────────────────
   market_reporter:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: alpha_market_reporter
-    command: python -m bots.market_reporter.bot
+    command: python scripts/run_market_reporter.py
     env_file:
       - .env
     environment:
@@ -241,7 +234,6 @@ services:
       - 8.8.4.4
       - 1.1.1.1
 
-  # ── Dashboard (Streamlit) ────────────────────────────────────
   dashboard:
     build:
       context: .
@@ -275,7 +267,6 @@ services:
       - alpha_network
     restart: unless-stopped
 
-  # ── Telegram Bot ─────────────────────────────────────────────
   telegram_bot:
     build:
       context: .
@@ -308,7 +299,6 @@ services:
       - alpha_network
     restart: unless-stopped
 
-  # ── Freqtrade (Backtesting & Paper Trading) ──────────────────
   freqtrade:
     image: freqtradeorg/freqtrade:stable_freqai
     container_name: alpha_freqtrade
@@ -334,9 +324,6 @@ services:
       - alpha_network
     restart: unless-stopped
 
-  # ── FastAPI Operational API (DISABLED by default) ────────────
-  # Start only when needed:
-  #   docker compose --profile api up -d api
   api:
     profiles:
       - api
