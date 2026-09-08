@@ -4,8 +4,8 @@ from loguru import logger
 
 
 @app.task(name="bots.weekly_reviewer.tasks.run_weekly_reviewer", bind=True, max_retries=2)
-def run_weekly_reviewer(self, send_telegram: bool = True, force: bool = False):
-    """Run weekly review + self_trainer v1 + optional Telegram report."""
+def run_weekly_reviewer(self, send_telegram: bool = True, force: bool = True):
+    """Friday schedule always notifies; skip-flag no longer blocks the report."""
     try:
         from bots.weekly_reviewer.bot import WeeklyReviewerBot
 
