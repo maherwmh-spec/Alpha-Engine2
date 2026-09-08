@@ -11,6 +11,7 @@ Nightly after close: personality 16:30, features 16:45, sentiment 17:00.
 Morning watchlist: 08:00 Sun–Thu.
 Weekly reviewer + self_trainer: Friday 18:00.
 Genetic: 21:00 Sun–Thu (after close, not during the session).
+Crontab hours are wall-clock Asia/Riyadh (enable_utc=False).
 """
 
 import os
@@ -69,7 +70,7 @@ app.conf.update(
     accept_content=['json'],
     result_serializer='json',
     timezone='Asia/Riyadh',
-    enable_utc=True,
+    enable_utc=False,
     task_track_started=True,
     task_time_limit=30 * 60,
     task_soft_time_limit=25 * 60,
