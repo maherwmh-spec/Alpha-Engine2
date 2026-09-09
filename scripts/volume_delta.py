@@ -7,6 +7,9 @@ from typing import Any, Dict, Tuple
 # symbol -> (session_date, last_cumulative)
 _STATE: Dict[str, Tuple[date, int]] = {}
 
+# First observation after a restart is often the session total, not a 1-minute bar.
+_SESSION_SEED_THRESHOLD = 2_000_000
+
 
 def _as_date(ts: Any) -> date:
     if isinstance(ts, datetime):
@@ -32,7 +35,13 @@ def minute_volume_from_cumulative(symbol: str, raw_volume: int, ts: Any = None) 
     key = str(symbol or "")
     prev = _STATE.get(key)
 
-    if prev is None or prev[0] != day or raw < prev[1]:
+    if prev is None or prev[0] != day:
+        _STATE[key] = (day, raw)
+        if raw >= _SESSION_SEED_THRESHOLD:
+            return 0
+        return raw
+
+    if raw < prev[1]:
         _STATE[key] = (day, raw)
         return raw
 
