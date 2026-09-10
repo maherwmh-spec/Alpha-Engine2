@@ -1,22 +1,31 @@
 """Convert session-cumulative volume on live 1m candles into per-minute volume."""
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timezone, timedelta
 from typing import Any, Dict, Optional, Tuple
 
 _STATE: Dict[str, Tuple[date, int]] = {}
 _SESSION_SEED_THRESHOLD = 2_000_000
+_RIYADH = timezone(timedelta(hours=3))
 
 
 def _as_date(ts: Any) -> date:
     if isinstance(ts, datetime):
-        return ts.date()
+        return ts.astimezone(_RIYADH).date() if ts.tzinfo else ts.date()
     if isinstance(ts, date):
         return ts
     try:
         return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).date()
     except Exception:
-        return datetime.utcnow().date()
+        return datetime.now(_RIYADH).date()
+
+
+def to_riyadh_minute(ts: Any) -> datetime:
+    if isinstance(ts, datetime):
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts.astimezone(_RIYADH).replace(second=0, microsecond=0)
+    return datetime.now(_RIYADH).replace(second=0, microsecond=0)
 
 
 def minute_volume_from_cumulative(symbol: str, raw_volume: int, ts: Any = None) -> int:
@@ -42,29 +51,12 @@ def minute_volume_from_cumulative(symbol: str, raw_volume: int, ts: Any = None) 
     return max(int(delta), 0)
 
 
-def install_save_hook(cls) -> None:
-    orig = cls._save_candle_to_db
-
-    async def _wrapped(self, candle):
-        c = dict(candle or {})
-        source = c.get("source") or "sahmk_websocket"
-        if source == "sahmk_websocket":
-            c["volume"] = minute_volume_from_cumulative(
-                c.get("symbol", ""),
-                c.get("volume", 0),
-                c.get("timestamp") or c.get("time"),
-            )
-        return await orig(self, c)
-
-    cls._save_candle_to_db = _wrapped
-
-
 def install_aggregator_hook() -> None:
     from scripts.sahmk_client import CandleAggregator
 
     def add_tick(self, symbol: str, price: float, volume: float, timestamp: datetime) -> Optional[dict]:
         with self._lock:
-            minute_key = timestamp.replace(second=0, microsecond=0)
+            minute_key = to_riyadh_minute(timestamp)
             try:
                 raw = float(volume or 0)
             except (TypeError, ValueError):
