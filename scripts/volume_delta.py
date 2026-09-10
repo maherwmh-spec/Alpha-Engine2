@@ -60,10 +60,9 @@ def install_save_hook(cls) -> None:
 
 
 def install_aggregator_hook() -> None:
-    """SahmK ticks carry session cumulative volume; do not sum ticks."""
     from scripts.sahmk_client import CandleAggregator
 
-    def add_tick(self, symbol: str, price: float, volume: float, timestamp: datetime) -> Optional[Dict]:
+    def add_tick(self, symbol: str, price: float, volume: float, timestamp: datetime) -> Optional[dict]:
         with self._lock:
             minute_key = timestamp.replace(second=0, microsecond=0)
             try:
