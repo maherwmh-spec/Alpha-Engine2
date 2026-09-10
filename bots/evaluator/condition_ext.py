@@ -128,7 +128,6 @@ def evaluate_condition_extended(self, df: pd.DataFrame, cond: Dict[str, Any], si
     false_series = pd.Series([False] * n, index=df.index)
 
     try:
-        # Prefer original method for legacy indicators when possible
         base = getattr(self, "_evaluate_condition_legacy", None)
         if base is not None and indicator in {
             "RSI", "SMA_CROSS", "EMA_CROSS", "EMA_PRICE", "MACD",
@@ -221,7 +220,9 @@ def evaluate_condition_extended(self, df: pd.DataFrame, cond: Dict[str, Any], si
 
 def apply_evaluator_patches() -> None:
     from bots.evaluator.bot import StrategyEvaluator
+    from bots.evaluator.fetch_ext import patch_fetch
 
+    patch_fetch()
     if not getattr(StrategyEvaluator, "_phase1_patched", False):
         StrategyEvaluator._evaluate_condition_legacy = StrategyEvaluator._evaluate_condition
         StrategyEvaluator._compute_indicators = compute_indicators_extended
