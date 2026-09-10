@@ -3,10 +3,11 @@ import asyncio
 from loguru import logger
 
 from bots.market_reporter.bot import MarketReporter
-from scripts.volume_delta import install_save_hook
+from scripts.volume_delta import install_aggregator_hook, install_save_hook
 
 
 async def main():
+    install_aggregator_hook()
     install_save_hook(MarketReporter)
     reporter = MarketReporter()
     await reporter.run()
